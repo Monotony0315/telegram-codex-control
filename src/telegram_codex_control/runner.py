@@ -358,8 +358,13 @@ class Runner:
         role = str(item.get("role", "")).strip().lower()
         if item_type == "error":
             return None
-        if role == "assistant" or item_type in {"assistant", "assistant_message", "message"}:
-            return cls._extract_text_from_content(item.get("content"))
+        if role == "assistant" or item_type in {"assistant", "assistant_message", "agent_message", "message"}:
+            text = cls._extract_text_from_content(item.get("content"))
+            if text:
+                return text
+            direct = item.get("text")
+            if isinstance(direct, str) and direct.strip():
+                return direct.strip()
         return None
 
     @classmethod

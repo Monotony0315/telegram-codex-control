@@ -197,6 +197,44 @@ def test_runner_chat_turn_resume_uses_existing_thread_when_no_started_event(
     assert argv[6] == "continue"
 
 
+def test_runner_chat_turn_resume_extracts_agent_message_item_text(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    store: Store,
+) -> None:
+    runner = Runner(settings, store)
+
+    class _FakeProcess:
+        pid = 5555
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            stdout = (
+                '{"type":"item.completed","item":{"id":"item_1","type":"reasoning","text":"thinking"}}\n'
+                '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"파싱 성공"}}\n'
+                '{"type":"turn.completed","usage":{"output_tokens":10}}\n'
+            )
+            return stdout.encode("utf-8"), b""
+
+        def send_signal(self, _sig: int) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+    async def fake_spawn(_argv: list[str]):
+        return _FakeProcess()
+
+    monkeypatch.setattr(runner, "_spawn_process", fake_spawn)
+
+    async def scenario() -> None:
+        result = await runner.run_chat_turn(prompt="resume", thread_id="thread-prev")
+        assert result.thread_id == "thread-prev"
+        assert result.assistant_text == "파싱 성공"
+
+    asyncio.run(scenario())
+
+
 def test_runner_chat_turn_blocks_while_background_job_active(
     monkeypatch: pytest.MonkeyPatch,
     settings: Settings,
