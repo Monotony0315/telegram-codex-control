@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 - 2026-02-19
+- Added interactive chat mode for Telegram plain text messages (`/chat` path).
+- Fixed non-slash input crash (`Command names must start with '/'`) by normalizing plain text to `/chat`.
+- Added persisted chat sessions per `(user_id, chat_id)` in SQLite and `/chat reset` support.
+- Added `TELEGRAM_INTERACTIVE_MODE` (default `true`) to control plain-text chat behavior.
+- Added/expanded tests for chat routing, policy enforcement, runner chat argv parsing, and store chat session lifecycle.
+
 ## 0.3.0 - 2026-02-19
 - Added webhook transport mode with Telegram `setWebhook` integration and local HTTP receiver.
 - Added command policy engine (`COMMAND_POLICY_PATH`) with per-identity allow/deny controls.
