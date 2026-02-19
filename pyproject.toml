@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-codex-control"
-version = "0.3.1"
+version = "0.3.2"
 description = "Telegram long-polling controller for Codex with safety controls."
 readme = "README.md"
 requires-python = ">=3.12"

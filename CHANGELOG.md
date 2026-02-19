@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2 - 2026-02-19
+- Fixed Telegram chat `No response` issue on resumed sessions by parsing Codex JSON events of type `agent_message`.
+- Added fallback extraction from direct `item.text` when message content blocks are absent.
+- Added regression test for `item.completed` + `agent_message.text` parsing.
+
 ## 0.3.1 - 2026-02-19
 - Added interactive chat mode for Telegram plain text messages (`/chat` path).
 - Fixed non-slash input crash (`Command names must start with '/'`) by normalizing plain text to `/chat`.
