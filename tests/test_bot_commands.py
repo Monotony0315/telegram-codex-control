@@ -302,6 +302,10 @@ def test_plain_text_routes_to_chat_turn(settings: Settings, store: Store) -> Non
     assert store.get_chat_session_thread(user_id=settings.allowed_user_id, chat_id=settings.allowed_chat_id) == "thread-new"
     sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
     assert sent_texts[-1] == "chat-reply: hello from telegram"
+    rows = store.list_events(limit=20)
+    chat_events = [row for row in rows if row["event_type"] == "chat_turn"]
+    assert chat_events
+    assert "assistant_len=" in chat_events[-1]["message"]
 
 
 def test_plain_text_chat_resumes_saved_thread(settings: Settings, store: Store) -> None:
@@ -401,6 +405,36 @@ def test_plain_text_chat_reports_runner_failure(settings: Settings, store: Store
     sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
     assert sent_texts
     assert sent_texts[-1] == "Chat turn failed: network down"
+
+
+def test_plain_text_chat_empty_response_sends_actionable_message(settings: Settings, store: Store) -> None:
+    class _EmptyRunner(DummyRunner):
+        async def run_chat_turn(self, *, prompt: str, thread_id: str | None = None) -> ChatTurnResult:
+            del prompt, thread_id
+            return ChatTurnResult(thread_id="thread-empty", assistant_text="No response.")
+
+    client = FakeTelegramClient()
+    runner = _EmptyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 46,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "plain text command",
+                },
+            }
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert sent_texts[-1] == "No response from Codex. Please retry, or run /chat reset."
+    rows = store.list_events(limit=20)
+    assert any(row["event_type"] == "chat_empty_response" for row in rows)
 
 
 def test_command_policy_can_deny_specific_command(settings: Settings, store: Store, tmp_path) -> None:

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.3 - 2026-02-19
+- Improved chat observability by recording `assistant_len` in `chat_turn` events.
+- Added explicit `chat_empty_response` event when assistant output is empty.
+- Changed user-facing empty-output message to actionable guidance: retry or `/chat reset`.
+- Added tests for chat-turn telemetry and empty-response handling.
+
 ## 0.3.2 - 2026-02-19
 - Fixed Telegram chat `No response` issue on resumed sessions by parsing Codex JSON events of type `agent_message`.
 - Added fallback extraction from direct `item.text` when message content blocks are absent.

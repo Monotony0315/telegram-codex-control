@@ -262,10 +262,19 @@ class TelegramBotDaemon:
                 "chat_turn",
                 (
                     f"user={user_id} chat={chat_id} "
-                    f"resumed={existing_thread_id is not None} thread_id={result.thread_id}"
+                    f"resumed={existing_thread_id is not None} thread_id={result.thread_id} "
+                    f"assistant_len={len(result.assistant_text)}"
                 ),
             )
-            await self.send_message(chat_id, result.assistant_text)
+            assistant_text = result.assistant_text.strip() or "No response."
+            if assistant_text == "No response.":
+                self.store.add_event(
+                    None,
+                    "chat_empty_response",
+                    f"user={user_id} chat={chat_id} thread_id={result.thread_id}",
+                )
+                assistant_text = "No response from Codex. Please retry, or run /chat reset."
+            await self.send_message(chat_id, assistant_text)
             return
 
         if command == "/run":
