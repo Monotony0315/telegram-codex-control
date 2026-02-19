@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-codex-control"
+version = "0.2.0"
+description = "Telegram long-polling controller for Codex with safety controls."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "httpx>=0.27,<0.29",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0,<9",
+]
+
+[project.scripts]
+telegram-codex-control = "telegram_codex_control.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
