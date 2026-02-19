@@ -5,8 +5,11 @@ import asyncio
 import json
 import re
 
+import pytest
+
 from telegram_codex_control.bot import TelegramBotDaemon
 from telegram_codex_control.config import Settings
+from telegram_codex_control.runner import ChatTurnResult
 from telegram_codex_control.safety import SafetyManager
 from telegram_codex_control.store import ActiveJobExistsError, Store
 
@@ -48,6 +51,7 @@ class DummyRunner:
         self.run_calls: list[str] = []
         self.autopilot_calls: list[str] = []
         self.codex_calls: list[str] = []
+        self.chat_calls: list[tuple[str, str | None]] = []
         self.cancel_calls = 0
         self._notifier = None
 
@@ -65,6 +69,13 @@ class DummyRunner:
     async def start_codex(self, raw_args: str):
         self.codex_calls.append(raw_args)
         return type("Job", (), {"id": 303})()
+
+    async def run_chat_turn(self, *, prompt: str, thread_id: str | None = None) -> ChatTurnResult:
+        self.chat_calls.append((prompt, thread_id))
+        return ChatTurnResult(
+            thread_id=thread_id or "thread-new",
+            assistant_text=f"chat-reply: {prompt}",
+        )
 
     async def cancel_active_job(self) -> bool:
         self.cancel_calls += 1
@@ -265,7 +276,131 @@ def test_help_lists_supported_commands(settings: Settings, store: Store) -> None
     )
     sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
     assert sent_texts
+    assert "/chat" in sent_texts[-1]
     assert "/codex" in sent_texts[-1]
+
+
+def test_plain_text_routes_to_chat_turn(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 40,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "hello from telegram",
+                },
+            }
+        )
+    )
+
+    assert runner.chat_calls == [("hello from telegram", None)]
+    assert store.get_chat_session_thread(user_id=settings.allowed_user_id, chat_id=settings.allowed_chat_id) == "thread-new"
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts[-1] == "chat-reply: hello from telegram"
+
+
+def test_plain_text_chat_resumes_saved_thread(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+    store.set_chat_session_thread(user_id=settings.allowed_user_id, chat_id=settings.allowed_chat_id, thread_id="thread-prev")
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 41,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "continue please",
+                },
+            }
+        )
+    )
+
+    assert runner.chat_calls == [("continue please", "thread-prev")]
+
+
+def test_chat_reset_clears_saved_thread(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+    store.set_chat_session_thread(user_id=settings.allowed_user_id, chat_id=settings.allowed_chat_id, thread_id="thread-prev")
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 42,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "/chat reset",
+                },
+            }
+        )
+    )
+
+    assert store.get_chat_session_thread(user_id=settings.allowed_user_id, chat_id=settings.allowed_chat_id) is None
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts[-1] == "Chat session reset."
+
+
+def test_plain_text_chat_guides_when_interactive_mode_disabled(settings: Settings, store: Store) -> None:
+    local_settings = replace(settings, telegram_interactive_mode=False)
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(local_settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 43,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "plain text command",
+                },
+            }
+        )
+    )
+
+    assert runner.chat_calls == []
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert sent_texts[-1] == "Interactive chat is disabled. Use slash commands or set TELEGRAM_INTERACTIVE_MODE=true."
+
+
+def test_plain_text_chat_reports_runner_failure(settings: Settings, store: Store) -> None:
+    class _FailingRunner(DummyRunner):
+        async def run_chat_turn(self, *, prompt: str, thread_id: str | None = None) -> ChatTurnResult:
+            del prompt, thread_id
+            raise RuntimeError("network down")
+
+    client = FakeTelegramClient()
+    runner = _FailingRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 45,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "plain text command",
+                },
+            }
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert sent_texts[-1] == "Chat turn failed: network down"
 
 
 def test_command_policy_can_deny_specific_command(settings: Settings, store: Store, tmp_path) -> None:
@@ -306,6 +441,50 @@ def test_command_policy_can_deny_specific_command(settings: Settings, store: Sto
     sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
     assert sent_texts
     assert "Command denied by policy: /run" == sent_texts[-1]
+
+
+def test_command_policy_applies_to_plain_text_chat_as_chat_command(
+    settings: Settings,
+    store: Store,
+    tmp_path,
+) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "user_id": settings.allowed_user_id,
+                        "chat_id": settings.allowed_chat_id,
+                        "allow": ["/status", "/logs"],
+                        "deny": [],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    local_settings = replace(settings, command_policy_path=policy_path)
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(local_settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 44,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "chat message denied by policy",
+                },
+            }
+        )
+    )
+
+    assert runner.chat_calls == []
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts[-1] == "Command denied by policy: /chat"
 
 
 def test_configure_webhook_calls_set_webhook(settings: Settings, store: Store) -> None:
@@ -360,7 +539,10 @@ def test_webhook_http_receiver_accepts_valid_update(settings: Settings, store: S
     bot = _make_bot(local_settings, store, runner, client)
 
     async def scenario() -> str:
-        server = await asyncio.start_server(bot._handle_webhook_connection, host="127.0.0.1", port=0)
+        try:
+            server = await asyncio.start_server(bot._handle_webhook_connection, host="127.0.0.1", port=0)
+        except PermissionError:
+            pytest.skip("Socket bind not permitted in this environment")
         port = server.sockets[0].getsockname()[1]
         update = {
             "update_id": 77,

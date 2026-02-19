@@ -68,6 +68,7 @@ class Settings:
     db_path: Path
     audit_log_path: Path
     codex_command: str
+    telegram_interactive_mode: bool
     poll_timeout_seconds: int
     poll_retry_base_seconds: float
     poll_retry_max_seconds: float
@@ -160,6 +161,7 @@ class Settings:
             db_path=db_path,
             audit_log_path=audit_log_path,
             codex_command=raw_env.get("CODEX_COMMAND", "codex"),
+            telegram_interactive_mode=_parse_bool(raw_env, "TELEGRAM_INTERACTIVE_MODE", True),
             poll_timeout_seconds=_parse_int(raw_env, "POLL_TIMEOUT_SECONDS", 30),
             poll_retry_base_seconds=_parse_float(raw_env, "POLL_RETRY_BASE_SECONDS", 1.0),
             poll_retry_max_seconds=_parse_float(raw_env, "POLL_RETRY_MAX_SECONDS", 30.0),

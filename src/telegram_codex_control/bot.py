@@ -192,7 +192,7 @@ class TelegramBotDaemon:
         if command == "/help":
             await self.send_message(
                 chat_id,
-                "Commands: /status, /run, /autopilot, /codex, /confirm, /cancel, /logs, /help",
+                "Commands: /status, /chat, /run, /autopilot, /codex, /confirm, /cancel, /logs, /help",
             )
             return
 
@@ -209,6 +209,63 @@ class TelegramBotDaemon:
             active_job = self.store.get_active_job()
             status_text = format_status(self.runner.uptime_seconds(), active_job)
             await self.send_message(chat_id, status_text)
+            return
+
+        if command == "/chat":
+            normalized_arg = arg.strip()
+            if not normalized_arg:
+                thread_id = self.store.get_chat_session_thread(user_id=user_id, chat_id=chat_id)
+                mode_text = "enabled" if self.settings.telegram_interactive_mode else "disabled"
+                session_text = thread_id if thread_id else "none"
+                await self.send_message(
+                    chat_id,
+                    (
+                        f"Interactive chat: {mode_text}\n"
+                        f"Session: {session_text}\n"
+                        "Usage: send plain text or /chat <message>\n"
+                        "Reset session: /chat reset"
+                    ),
+                )
+                return
+            if normalized_arg.lower() == "reset":
+                cleared = self.store.clear_chat_session(user_id=user_id, chat_id=chat_id)
+                self.store.add_event(
+                    None,
+                    "chat_session_reset",
+                    f"user={user_id} chat={chat_id} cleared={cleared}",
+                )
+                await self.send_message(chat_id, "Chat session reset." if cleared else "No chat session to reset.")
+                return
+            if not self.settings.telegram_interactive_mode:
+                await self.send_message(
+                    chat_id,
+                    "Interactive chat is disabled. Use slash commands or set TELEGRAM_INTERACTIVE_MODE=true.",
+                )
+                return
+
+            existing_thread_id = self.store.get_chat_session_thread(user_id=user_id, chat_id=chat_id)
+            try:
+                result = await self.runner.run_chat_turn(prompt=normalized_arg, thread_id=existing_thread_id)
+            except ActiveJobExistsError:
+                await self.send_message(chat_id, "A job is already running.")
+                return
+            except Exception as exc:
+                await self.send_message(chat_id, f"Chat turn failed: {redact_text(str(exc))}")
+                return
+            self.store.set_chat_session_thread(
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=result.thread_id,
+            )
+            self.store.add_event(
+                None,
+                "chat_turn",
+                (
+                    f"user={user_id} chat={chat_id} "
+                    f"resumed={existing_thread_id is not None} thread_id={result.thread_id}"
+                ),
+            )
+            await self.send_message(chat_id, result.assistant_text)
             return
 
         if command == "/run":
@@ -338,7 +395,7 @@ class TelegramBotDaemon:
 
         await self.send_message(
             chat_id,
-            "Unknown command. Available: /status, /run, /autopilot, /codex, /confirm, /cancel, /logs, /help",
+            "Unknown command. Available: /status, /chat, /run, /autopilot, /codex, /confirm, /cancel, /logs, /help",
         )
 
     async def send_to_allowed_chat(self, text: str) -> None:
@@ -521,6 +578,11 @@ class TelegramBotDaemon:
 
     @staticmethod
     def _parse_command(text: str) -> tuple[str, str]:
+        stripped = text.strip()
+        if not stripped:
+            return "/chat", ""
+        if not stripped.startswith("/"):
+            return "/chat", stripped
         parts = text.split(maxsplit=1)
         command_token = parts[0]
         if command_token.startswith("/"):

@@ -195,3 +195,26 @@ def test_from_env_rejects_missing_command_policy_path(workspace_root: Path) -> N
     }
     with pytest.raises(ConfigError):
         Settings.from_env(env=env, base_dir=workspace_root)
+
+
+def test_from_env_defaults_interactive_mode_to_true(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+    }
+    settings = Settings.from_env(env=env, base_dir=workspace_root)
+    assert settings.telegram_interactive_mode is True
+
+
+def test_from_env_allows_disabling_interactive_mode(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "TELEGRAM_INTERACTIVE_MODE": "false",
+    }
+    settings = Settings.from_env(env=env, base_dir=workspace_root)
+    assert settings.telegram_interactive_mode is False

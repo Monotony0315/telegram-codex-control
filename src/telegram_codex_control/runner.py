@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
 import asyncio
+import json
 import os
 import shlex
 import signal
 import subprocess
+import tempfile
 import time
 
 from .config import Settings
@@ -15,6 +19,12 @@ from .utils import chunk_text, redact_text
 
 Notifier = Callable[[str], Awaitable[None]]
 CANCEL_SLA_SECONDS = 15.0
+
+
+@dataclass(frozen=True, slots=True)
+class ChatTurnResult:
+    thread_id: str
+    assistant_text: str
 
 
 class Runner:
@@ -45,6 +55,57 @@ class Runner:
 
     async def start_codex(self, raw_args: str) -> Job:
         return await self._start_job(command="codex", prompt=raw_args)
+
+    async def run_chat_turn(self, *, prompt: str, thread_id: str | None = None) -> ChatTurnResult:
+        clean_prompt = prompt.strip()
+        if not clean_prompt:
+            raise ValueError("Chat prompt must not be empty")
+        resume_thread_id = thread_id.strip() if thread_id and thread_id.strip() else None
+
+        async with self._lock:
+            if self._process is not None and self._process.returncode is None:
+                raise ActiveJobExistsError("An active job is already running")
+
+        output_path: Path | None = None
+        if resume_thread_id is None:
+            fd, output_path_raw = tempfile.mkstemp(prefix="telegram-codex-chat-", suffix=".txt")
+            os.close(fd)
+            output_path = Path(output_path_raw)
+        argv = self._build_chat_argv(prompt=clean_prompt, output_path=output_path, thread_id=resume_thread_id)
+        try:
+            process = await self._spawn_process(argv)
+            try:
+                stdout_raw, stderr_raw = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=float(self.settings.job_timeout_seconds),
+                )
+            except asyncio.TimeoutError as exc:
+                await self._cancel_process(process)
+                raise RuntimeError("Chat turn timed out") from exc
+
+            stdout_text = stdout_raw.decode(errors="replace")
+            stderr_text = stderr_raw.decode(errors="replace")
+            if process.returncode != 0:
+                detail = redact_text(stderr_text.strip() or stdout_text.strip() or f"exit={process.returncode}")
+                raise RuntimeError(f"Chat turn failed: {detail}")
+
+            all_text = f"{stdout_text}\n{stderr_text}"
+            resolved_thread_id = self._extract_thread_id_from_jsonl(all_text) or resume_thread_id
+            if not resolved_thread_id:
+                raise RuntimeError("Chat turn missing thread.started thread_id")
+
+            assistant_text = self._extract_assistant_text_from_jsonl(all_text)
+            if not assistant_text and output_path is not None:
+                assistant_text = self._read_chat_output(output_path)
+            if not assistant_text:
+                assistant_text = "No response."
+            return ChatTurnResult(thread_id=resolved_thread_id, assistant_text=assistant_text)
+        finally:
+            if output_path is not None:
+                try:
+                    output_path.unlink()
+                except FileNotFoundError:
+                    pass
 
     async def wait_for_current_job(self) -> None:
         task = self._job_task
@@ -162,6 +223,29 @@ class Runner:
             return [self.settings.codex_command, *parsed_args]
         raise ValueError(f"Unsupported command: {command}")
 
+    def _build_chat_argv(self, *, prompt: str, output_path: Path | None, thread_id: str | None) -> list[str]:
+        if thread_id:
+            return [
+                self.settings.codex_command,
+                "exec",
+                "resume",
+                "--json",
+                thread_id,
+                "--",
+                prompt,
+            ]
+        if output_path is None:
+            raise ValueError("output_path is required for new chat sessions")
+        return [
+            self.settings.codex_command,
+            "exec",
+            "--json",
+            "-o",
+            str(output_path),
+            "--",
+            prompt,
+        ]
+
     @staticmethod
     def _parse_codex_args(raw_args: str) -> list[str]:
         try:
@@ -182,6 +266,142 @@ class Runner:
             env=self.settings.subprocess_env(),
             start_new_session=True,
         )
+
+    @staticmethod
+    def _extract_thread_id_from_jsonl(jsonl_text: str) -> str | None:
+        thread_id: str | None = None
+        for raw_line in jsonl_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            event_name = payload.get("type") or payload.get("event")
+            if event_name != "thread.started":
+                continue
+            event_thread_id = payload.get("thread_id")
+            if isinstance(event_thread_id, str) and event_thread_id.strip():
+                thread_id = event_thread_id.strip()
+                continue
+            thread_obj = payload.get("thread")
+            if isinstance(thread_obj, dict):
+                nested = thread_obj.get("id") or thread_obj.get("thread_id")
+                if isinstance(nested, str) and nested.strip():
+                    thread_id = nested.strip()
+        return thread_id
+
+    @staticmethod
+    def _read_chat_output(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    @classmethod
+    def _extract_assistant_text_from_jsonl(cls, jsonl_text: str) -> str:
+        deltas: list[str] = []
+        candidates: list[str] = []
+
+        for raw_line in jsonl_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            event_name = payload.get("type") or payload.get("event")
+            if event_name == "response.output_text.delta":
+                delta = payload.get("delta")
+                if isinstance(delta, str) and delta:
+                    deltas.append(delta)
+                    continue
+            if event_name == "response.output_text.done":
+                text = payload.get("text")
+                if isinstance(text, str) and text.strip():
+                    candidates.append(text.strip())
+                    continue
+
+            if event_name == "item.completed":
+                item = payload.get("item")
+                text = cls._extract_assistant_text_from_item(item)
+                if text:
+                    candidates.append(text)
+                    continue
+
+            if event_name == "response.completed":
+                response = payload.get("response")
+                text = cls._extract_assistant_text_from_response(response)
+                if text:
+                    candidates.append(text)
+
+        if deltas:
+            text = "".join(deltas).strip()
+            if text:
+                return text
+        if candidates:
+            return candidates[-1]
+        return ""
+
+    @classmethod
+    def _extract_assistant_text_from_item(cls, item: object) -> str | None:
+        if not isinstance(item, dict):
+            return None
+        item_type = str(item.get("type", "")).strip().lower()
+        role = str(item.get("role", "")).strip().lower()
+        if item_type == "error":
+            return None
+        if role == "assistant" or item_type in {"assistant", "assistant_message", "message"}:
+            return cls._extract_text_from_content(item.get("content"))
+        return None
+
+    @classmethod
+    def _extract_assistant_text_from_response(cls, response: object) -> str | None:
+        if not isinstance(response, dict):
+            return None
+        output = response.get("output")
+        if not isinstance(output, list):
+            return None
+
+        for item in reversed(output):
+            text = cls._extract_assistant_text_from_item(item)
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _extract_text_from_content(content: object) -> str | None:
+        if not isinstance(content, list):
+            return None
+        texts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type", "")).strip().lower()
+            if part_type not in {"text", "output_text"}:
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+                continue
+            if isinstance(text, dict):
+                nested = text.get("value")
+                if isinstance(nested, str) and nested.strip():
+                    texts.append(nested.strip())
+                continue
+            value = part.get("value")
+            if isinstance(value, str) and value.strip():
+                texts.append(value.strip())
+        if not texts:
+            return None
+        return "\n".join(texts)
 
     async def _monitor_job(self, job_id: int, process: asyncio.subprocess.Process) -> None:
         stdout_task = asyncio.create_task(self._stream_output(job_id, "stdout", process.stdout))

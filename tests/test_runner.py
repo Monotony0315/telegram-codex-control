@@ -98,6 +98,145 @@ def test_runner_rejects_invalid_raw_codex_argv(settings: Settings, store: Store)
         runner._build_argv("codex", '"unterminated')
 
 
+def test_runner_builds_chat_resume_argv(settings: Settings, store: Store) -> None:
+    runner = Runner(settings, store)
+    argv = runner._build_chat_argv(prompt="hello", output_path=None, thread_id="thread-123")
+    assert argv == [
+        settings.codex_command,
+        "exec",
+        "resume",
+        "--json",
+        "thread-123",
+        "--",
+        "hello",
+    ]
+
+
+def test_runner_chat_turn_reads_output_and_thread_id(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    store: Store,
+) -> None:
+    runner = Runner(settings, store)
+    seen: dict[str, list[str]] = {}
+
+    class _FakeProcess:
+        pid = 3333
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            stderr = b'{"type":"thread.started","thread_id":"thread-abc"}\n'
+            return b"", stderr
+
+        def send_signal(self, _sig: int) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+    async def fake_spawn(argv: list[str]):
+        seen["argv"] = argv
+        output_path = Path(argv[argv.index("-o") + 1])
+        output_path.write_text("Assistant reply text", encoding="utf-8")
+        return _FakeProcess()
+
+    monkeypatch.setattr(runner, "_spawn_process", fake_spawn)
+
+    async def scenario() -> None:
+        result = await runner.run_chat_turn(prompt="how are you?")
+        assert result.thread_id == "thread-abc"
+        assert result.assistant_text == "Assistant reply text"
+
+    asyncio.run(scenario())
+    argv = seen["argv"]
+    assert argv[0] == settings.codex_command
+    assert argv[1] == "exec"
+    assert argv[2:4] == ["--json", "-o"]
+    assert argv[4].endswith(".txt")
+    assert argv[5] == "--"
+    assert argv[6] == "how are you?"
+
+
+def test_runner_chat_turn_resume_uses_existing_thread_when_no_started_event(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    store: Store,
+) -> None:
+    runner = Runner(settings, store)
+    seen: dict[str, list[str]] = {}
+
+    class _FakeProcess:
+        pid = 4444
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b'{"type":"response.output_text.done","text":"Resumed response"}\n', b""
+
+        def send_signal(self, _sig: int) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+    async def fake_spawn(argv: list[str]):
+        seen["argv"] = argv
+        return _FakeProcess()
+
+    monkeypatch.setattr(runner, "_spawn_process", fake_spawn)
+
+    async def scenario() -> None:
+        result = await runner.run_chat_turn(prompt="continue", thread_id="thread-prev")
+        assert result.thread_id == "thread-prev"
+        assert result.assistant_text == "Resumed response"
+
+    asyncio.run(scenario())
+    argv = seen["argv"]
+    assert argv[:4] == [settings.codex_command, "exec", "resume", "--json"]
+    assert argv[4] == "thread-prev"
+    assert argv[5] == "--"
+    assert argv[6] == "continue"
+
+
+def test_runner_chat_turn_blocks_while_background_job_active(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    store: Store,
+) -> None:
+    class _FakeStream:
+        async def readline(self) -> bytes:
+            return b""
+
+    class _FakeProcess:
+        pid = 2222
+        returncode = None
+        stdout = _FakeStream()
+        stderr = _FakeStream()
+
+        async def wait(self) -> int:
+            await asyncio.sleep(10)
+            return 0
+
+        def send_signal(self, _sig: int) -> None:
+            self.returncode = 130
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    async def fake_exec(*args, **kwargs):  # noqa: ARG001
+        return _FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    async def scenario() -> None:
+        runner = Runner(settings, store)
+        await runner.start_run("hello")
+        with pytest.raises(ActiveJobExistsError):
+            await runner.run_chat_turn(prompt="should fail")
+        await runner.cancel_active_job()
+
+    asyncio.run(scenario())
+
+
 def test_runner_cancel_orphan_running_job(monkeypatch: pytest.MonkeyPatch, settings: Settings, store: Store) -> None:
     job = store.create_job(command="run", prompt="orphan", status="RUNNING")
     store.set_job_pid(job.id, 9001, pid_start_token="token-9001")

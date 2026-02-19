@@ -25,6 +25,7 @@ def settings(tmp_path: Path, workspace_root: Path) -> Settings:
         db_path=tmp_path / "state.db",
         audit_log_path=tmp_path / "audit.jsonl",
         codex_command="codex",
+        telegram_interactive_mode=True,
         poll_timeout_seconds=1,
         poll_retry_base_seconds=0.01,
         poll_retry_max_seconds=0.1,

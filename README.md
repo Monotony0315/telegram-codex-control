@@ -7,6 +7,7 @@ Keywords: `telegram bot`, `codex cli`, `remote development`, `developer automati
 ## Features
 - Command surface:
   - `/status`
+  - `/chat` (`/chat reset`, plain text routes here when interactive mode is enabled)
   - `/run <prompt>` (confirm required)
   - `/autopilot <task>` (confirm required)
   - `/codex <raw args...>` (confirm required)
@@ -40,6 +41,7 @@ ALLOWED_USER_ID=123456789
 ALLOWED_CHAT_ID=123456789
 WORKSPACE_ROOT=$HOME/Projects
 CODEX_COMMAND=/absolute/path/to/codex
+TELEGRAM_INTERACTIVE_MODE=true
 TELEGRAM_TRANSPORT=polling
 # COMMAND_POLICY_PATH=./command-policy.example.json
 ```
@@ -74,10 +76,10 @@ Use `command-policy.example.json` as a template.
 Example:
 ```json
 {
-  "default": { "allow": ["/status", "/logs", "/help"] },
+  "default": { "allow": ["/status", "/chat", "/logs", "/help"] },
   "rules": [
     { "user_id": 123, "chat_id": 456, "allow": ["*"], "deny": [] },
-    { "user_id": 111, "chat_id": -100222, "allow": ["/status", "/logs"], "deny": ["/run", "/autopilot", "/codex"] }
+    { "user_id": 111, "chat_id": -100222, "allow": ["/status", "/logs"], "deny": ["/run", "/autopilot", "/codex", "/chat"] }
   ]
 }
 ```
@@ -122,6 +124,7 @@ For GitHub tag releases, workflow requires `RELEASE_PRIVATE_KEY_PEM` secret and 
 - `DB_PATH` (default: `.data/state.db`)
 - `AUDIT_LOG_PATH` (default: `.data/audit.jsonl`)
 - `CODEX_COMMAND` (default: `codex`)
+- `TELEGRAM_INTERACTIVE_MODE` (default: `true`; when enabled, plain text is handled as `/chat <message>`)
 - `COMMAND_POLICY_PATH` (optional)
 - `TELEGRAM_TRANSPORT` (`polling` or `webhook`, default `polling`)
 - `TELEGRAM_WEBHOOK_PUBLIC_URL` (required for webhook mode)

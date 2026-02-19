@@ -126,6 +126,14 @@ class Store:
                     consumed_at TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS chat_sessions (
+                    user_id INTEGER NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, chat_id)
+                );
+
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_single_active
                 ON jobs((1))
                 WHERE status IN ('PENDING', 'CONFIRMING', 'RUNNING');
@@ -497,6 +505,50 @@ class Store:
                 expires_at=row["expires_at"],
                 consumed_at=now,
             )
+
+    def get_chat_session_thread(self, *, user_id: int, chat_id: int) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT thread_id
+                FROM chat_sessions
+                WHERE user_id = ? AND chat_id = ?
+                """,
+                (user_id, chat_id),
+            ).fetchone()
+            if row is None:
+                return None
+            value = row["thread_id"]
+            return str(value) if value else None
+
+    def set_chat_session_thread(self, *, user_id: int, chat_id: int, thread_id: str) -> None:
+        if not thread_id.strip():
+            raise ValueError("thread_id must not be empty")
+        now = utc_now_iso()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO chat_sessions (user_id, chat_id, thread_id, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, chat_id) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, chat_id, thread_id.strip(), now),
+            )
+            self._conn.commit()
+
+    def clear_chat_session(self, *, user_id: int, chat_id: int) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                DELETE FROM chat_sessions
+                WHERE user_id = ? AND chat_id = ?
+                """,
+                (user_id, chat_id),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
 
     def _append_audit_line(self, payload: dict) -> None:
         try:

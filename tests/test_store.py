@@ -137,3 +137,17 @@ def test_store_prunes_events_to_max_rows(store: Store) -> None:
     assert len(rows) == MAX_EVENT_ROWS
     assert rows[0]["message"] == "event-25"
     assert rows[-1]["message"] == f"event-{MAX_EVENT_ROWS + 24}"
+
+
+def test_chat_session_lifecycle(store: Store) -> None:
+    assert store.get_chat_session_thread(user_id=1, chat_id=2) is None
+
+    store.set_chat_session_thread(user_id=1, chat_id=2, thread_id="thread-a")
+    assert store.get_chat_session_thread(user_id=1, chat_id=2) == "thread-a"
+
+    store.set_chat_session_thread(user_id=1, chat_id=2, thread_id="thread-b")
+    assert store.get_chat_session_thread(user_id=1, chat_id=2) == "thread-b"
+
+    assert store.clear_chat_session(user_id=1, chat_id=2) is True
+    assert store.clear_chat_session(user_id=1, chat_id=2) is False
+    assert store.get_chat_session_thread(user_id=1, chat_id=2) is None

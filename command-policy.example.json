@@ -2,6 +2,7 @@
   "default": {
     "allow": [
       "/status",
+      "/chat",
       "/logs",
       "/help"
     ]
@@ -27,7 +28,8 @@
       "deny": [
         "/run",
         "/autopilot",
-        "/codex"
+        "/codex",
+        "/chat"
       ]
     }
   ]
