@@ -32,6 +32,13 @@ def settings(tmp_path: Path, workspace_root: Path) -> Settings:
         confirmation_ttl_seconds=120,
         message_chunk_size=3500,
         telegram_api_base="https://api.telegram.org",
+        telegram_transport="polling",
+        telegram_webhook_public_url=None,
+        telegram_webhook_listen_host="127.0.0.1",
+        telegram_webhook_listen_port=8080,
+        telegram_webhook_path="/telegram/webhook",
+        telegram_webhook_secret_token=None,
+        command_policy_path=None,
     )
 
 

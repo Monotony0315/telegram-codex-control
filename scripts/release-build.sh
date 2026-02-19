@@ -9,7 +9,20 @@ if [[ -x ".venv/bin/python" ]]; then
   PYTHON_BIN=".venv/bin/python"
 fi
 
-"${PYTHON_BIN}" -m pip install --upgrade build wheel
+if ! "${PYTHON_BIN}" - <<'PY'
+import importlib.util
+import sys
+
+required = ("build", "wheel")
+missing = [name for name in required if importlib.util.find_spec(name) is None]
+if missing:
+    print("MISSING", ",".join(missing))
+    raise SystemExit(1)
+PY
+then
+  "${PYTHON_BIN}" -m pip install --upgrade build wheel
+fi
+
 rm -rf dist/ build/
 "${PYTHON_BIN}" -m build --no-isolation
 

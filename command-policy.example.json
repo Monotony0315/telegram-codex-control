@@ -1,0 +1,34 @@
+{
+  "default": {
+    "allow": [
+      "/status",
+      "/logs",
+      "/help"
+    ]
+  },
+  "rules": [
+    {
+      "user_id": 123456789,
+      "chat_id": 123456789,
+      "allow": [
+        "*"
+      ],
+      "deny": []
+    },
+    {
+      "user_id": 111111111,
+      "chat_id": -1002222222222,
+      "allow": [
+        "/status",
+        "/logs",
+        "/cancel",
+        "/help"
+      ],
+      "deny": [
+        "/run",
+        "/autopilot",
+        "/codex"
+      ]
+    }
+  ]
+}

@@ -121,3 +121,77 @@ def test_from_env_default_workspace_root_falls_back_to_home(
     }
     settings = Settings.from_env(env=env, base_dir=tmp_path)
     assert settings.workspace_root == home.resolve()
+
+
+def test_from_env_webhook_requires_public_url(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "TELEGRAM_TRANSPORT": "webhook",
+        "TELEGRAM_WEBHOOK_SECRET_TOKEN": "0123456789abcdef",
+    }
+    with pytest.raises(ConfigError):
+        Settings.from_env(env=env, base_dir=workspace_root)
+
+
+def test_from_env_webhook_validates_public_url_scheme(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "TELEGRAM_TRANSPORT": "webhook",
+        "TELEGRAM_WEBHOOK_PUBLIC_URL": "http://bot.example.com",
+        "TELEGRAM_WEBHOOK_SECRET_TOKEN": "0123456789abcdef",
+    }
+    with pytest.raises(ConfigError):
+        Settings.from_env(env=env, base_dir=workspace_root)
+
+
+def test_from_env_accepts_webhook_settings(workspace_root: Path, tmp_path: Path) -> None:
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"rules":[]}', encoding="utf-8")
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "TELEGRAM_TRANSPORT": "webhook",
+        "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com",
+        "TELEGRAM_WEBHOOK_LISTEN_PORT": "8088",
+        "TELEGRAM_WEBHOOK_PATH": "/tg/inbound",
+        "TELEGRAM_WEBHOOK_SECRET_TOKEN": "0123456789abcdef",
+        "COMMAND_POLICY_PATH": str(policy),
+    }
+    settings = Settings.from_env(env=env, base_dir=workspace_root)
+    assert settings.telegram_transport == "webhook"
+    assert settings.telegram_webhook_url == "https://bot.example.com/tg/inbound"
+    assert settings.telegram_webhook_listen_port == 8088
+    assert settings.command_policy_path == policy.resolve()
+
+
+def test_from_env_webhook_requires_secret_token(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "TELEGRAM_TRANSPORT": "webhook",
+        "TELEGRAM_WEBHOOK_PUBLIC_URL": "https://bot.example.com",
+    }
+    with pytest.raises(ConfigError):
+        Settings.from_env(env=env, base_dir=workspace_root)
+
+
+def test_from_env_rejects_missing_command_policy_path(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "COMMAND_POLICY_PATH": "does-not-exist.json",
+    }
+    with pytest.raises(ConfigError):
+        Settings.from_env(env=env, base_dir=workspace_root)

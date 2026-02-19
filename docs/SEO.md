@@ -2,27 +2,42 @@
 
 ## Repository Metadata
 - Name: `telegram-codex-control`
-- Description suggestion:
-  `Telegram bot to control Codex CLI for remote software development with safety confirmation, persistent service mode, and audit logging.`
-- Topics suggestion:
-  `telegram-bot`, `codex`, `remote-development`, `automation`, `python`, `devops`, `cli`, `developer-tools`
+- Description:
+  `Telegram bot to control Codex CLI for remote software development with webhook/polling modes, command policies, and secure signed releases.`
+- Topics:
+  - `telegram-bot`
+  - `codex`
+  - `remote-development`
+  - `developer-tools`
+  - `automation`
+  - `python`
+  - `webhook`
+  - `sbom`
+  - `supply-chain-security`
 
-## README Optimization
-- Include high-intent keywords in the first screen:
-  - Telegram bot for Codex
-  - Remote development automation
-  - Background service (launchd/systemd)
-- Keep quick-start and command examples near top.
-- Add deployment/security docs links for trust signals.
+## README SEO Structure
+- Include intent phrase in first 2 lines:
+  - "Telegram remote control for Codex CLI"
+- Include high-intent operational keywords:
+  - webhook
+  - command policy
+  - signed release
+  - SBOM
+- Keep quick-start and command examples above fold.
 
 ## Release SEO
-- Use semantic tags: `v0.2.0`, `v0.2.1`, ...
+- Tag format: `vX.Y.Z`
 - Release title format:
-  `vX.Y.Z - Telegram Codex Remote Control`
-- Include searchable terms in release notes:
-  `telegram`, `codex`, `remote dev`, `autopilot`, `automation`, `macOS`, `Linux`.
+  - `vX.Y.Z - Telegram Codex Remote Control`
+- Include these terms in release notes:
+  - Telegram bot
+  - Codex CLI
+  - webhook
+  - secure release
+  - SBOM
+  - signatures
 
-## Content Strategy
-- Publish short demo GIF/video in README.
-- Add architecture diagram to improve discoverability and clarity.
-- Create `examples/` with real command flows.
+## Content Boosters
+- Add architecture image (polling vs webhook path).
+- Add short demo GIF of `/codex` + `/confirm`.
+- Add `examples/` command recipes for common workflows.

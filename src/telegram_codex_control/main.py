@@ -51,7 +51,7 @@ async def run_daemon() -> None:
     bot = TelegramBotDaemon(settings, store, runner, safety)
 
     try:
-        await bot.poll_forever()
+        await bot.run_forever()
     finally:
         await bot.close()
         store.close()

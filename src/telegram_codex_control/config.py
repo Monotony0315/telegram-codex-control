@@ -40,6 +40,18 @@ def _parse_float(env: Mapping[str, str], name: str, default: float) -> float:
         raise ConfigError(f"Invalid float for {name}: {raw}") from exc
 
 
+def _parse_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ConfigError(f"Invalid boolean for {name}: {raw}")
+
+
 def _resolve_path(path_value: str, base_dir: Path) -> Path:
     candidate = Path(path_value).expanduser()
     if not candidate.is_absolute():
@@ -63,10 +75,23 @@ class Settings:
     confirmation_ttl_seconds: int
     message_chunk_size: int
     telegram_api_base: str
+    telegram_transport: str
+    telegram_webhook_public_url: str | None
+    telegram_webhook_listen_host: str
+    telegram_webhook_listen_port: int
+    telegram_webhook_path: str
+    telegram_webhook_secret_token: str | None
+    command_policy_path: Path | None
 
     @property
     def telegram_base_url(self) -> str:
         return f"{self.telegram_api_base}/bot{self.telegram_bot_token}"
+
+    @property
+    def telegram_webhook_url(self) -> str:
+        if self.telegram_webhook_public_url is None:
+            raise ConfigError("TELEGRAM_WEBHOOK_PUBLIC_URL is required for webhook mode")
+        return f"{self.telegram_webhook_public_url}{self.telegram_webhook_path}"
 
     def subprocess_env(self) -> dict[str, str]:
         """Allowlist env passthrough for subprocess jobs."""
@@ -108,12 +133,24 @@ class Settings:
 
         db_path = _resolve_path(raw_env.get("DB_PATH", ".data/state.db"), root_dir)
         audit_log_path = _resolve_path(raw_env.get("AUDIT_LOG_PATH", ".data/audit.jsonl"), root_dir)
+        command_policy_raw = raw_env.get("COMMAND_POLICY_PATH", "").strip()
+        command_policy_path: Path | None = None
+        if command_policy_raw:
+            command_policy_path = _resolve_path(command_policy_raw, root_dir)
 
         chunk_size = _parse_int(raw_env, "MESSAGE_CHUNK_SIZE", 3500)
         if chunk_size <= 0:
             raise ConfigError("MESSAGE_CHUNK_SIZE must be greater than 0")
         if chunk_size > 3500:
             chunk_size = 3500
+
+        telegram_transport = raw_env.get("TELEGRAM_TRANSPORT", "polling").strip().lower()
+        telegram_webhook_public_url = raw_env.get("TELEGRAM_WEBHOOK_PUBLIC_URL", "").strip().rstrip("/")
+        webhook_public_url: str | None = telegram_webhook_public_url or None
+        telegram_webhook_listen_host = raw_env.get("TELEGRAM_WEBHOOK_LISTEN_HOST", "127.0.0.1").strip()
+        telegram_webhook_listen_port = _parse_int(raw_env, "TELEGRAM_WEBHOOK_LISTEN_PORT", 8080)
+        telegram_webhook_path = raw_env.get("TELEGRAM_WEBHOOK_PATH", "/telegram/webhook").strip()
+        telegram_webhook_secret_token = raw_env.get("TELEGRAM_WEBHOOK_SECRET_TOKEN", "").strip() or None
 
         settings = cls(
             telegram_bot_token=_require(raw_env, "TELEGRAM_BOT_TOKEN"),
@@ -130,6 +167,13 @@ class Settings:
             confirmation_ttl_seconds=_parse_int(raw_env, "CONFIRMATION_TTL_SECONDS", 300),
             message_chunk_size=chunk_size,
             telegram_api_base=raw_env.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/"),
+            telegram_transport=telegram_transport,
+            telegram_webhook_public_url=webhook_public_url,
+            telegram_webhook_listen_host=telegram_webhook_listen_host,
+            telegram_webhook_listen_port=telegram_webhook_listen_port,
+            telegram_webhook_path=telegram_webhook_path,
+            telegram_webhook_secret_token=telegram_webhook_secret_token,
+            command_policy_path=command_policy_path,
         )
 
         parsed_api_base = urlparse(settings.telegram_api_base)
@@ -155,5 +199,34 @@ class Settings:
             raise ConfigError("CONFIRMATION_TTL_SECONDS must be greater than 0")
         if not settings.codex_command.strip():
             raise ConfigError("CODEX_COMMAND must not be empty")
+        if settings.telegram_transport not in {"polling", "webhook"}:
+            raise ConfigError("TELEGRAM_TRANSPORT must be either 'polling' or 'webhook'")
+        if not settings.telegram_webhook_listen_host:
+            raise ConfigError("TELEGRAM_WEBHOOK_LISTEN_HOST must not be empty")
+        if settings.telegram_webhook_listen_port <= 0 or settings.telegram_webhook_listen_port > 65535:
+            raise ConfigError("TELEGRAM_WEBHOOK_LISTEN_PORT must be between 1 and 65535")
+        if not settings.telegram_webhook_path.startswith("/"):
+            raise ConfigError("TELEGRAM_WEBHOOK_PATH must start with '/'")
+        if " " in settings.telegram_webhook_path:
+            raise ConfigError("TELEGRAM_WEBHOOK_PATH must not contain spaces")
+        if settings.telegram_webhook_secret_token and len(settings.telegram_webhook_secret_token) > 256:
+            raise ConfigError("TELEGRAM_WEBHOOK_SECRET_TOKEN must be <= 256 characters")
+        if settings.telegram_transport == "webhook":
+            if settings.telegram_webhook_public_url is None:
+                raise ConfigError("TELEGRAM_WEBHOOK_PUBLIC_URL is required when TELEGRAM_TRANSPORT=webhook")
+            parsed_webhook = urlparse(settings.telegram_webhook_public_url)
+            if parsed_webhook.scheme != "https":
+                raise ConfigError("TELEGRAM_WEBHOOK_PUBLIC_URL must use https")
+            if not parsed_webhook.hostname:
+                raise ConfigError("TELEGRAM_WEBHOOK_PUBLIC_URL must include a valid host")
+            if not settings.telegram_webhook_secret_token:
+                raise ConfigError("TELEGRAM_WEBHOOK_SECRET_TOKEN is required when TELEGRAM_TRANSPORT=webhook")
+            if len(settings.telegram_webhook_secret_token) < 16:
+                raise ConfigError("TELEGRAM_WEBHOOK_SECRET_TOKEN must be at least 16 characters")
+        if settings.command_policy_path is not None:
+            if not settings.command_policy_path.exists():
+                raise ConfigError(f"COMMAND_POLICY_PATH does not exist: {settings.command_policy_path}")
+            if not settings.command_policy_path.is_file():
+                raise ConfigError(f"COMMAND_POLICY_PATH is not a file: {settings.command_policy_path}")
 
         return settings

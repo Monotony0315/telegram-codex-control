@@ -86,6 +86,18 @@ def test_runner_uses_exec_not_shell(monkeypatch: pytest.MonkeyPatch, settings: S
     assert "shell" not in kwargs
 
 
+def test_runner_builds_raw_codex_argv(settings: Settings, store: Store) -> None:
+    runner = Runner(settings, store)
+    argv = runner._build_argv("codex", '--help --model gpt-5 "build feature"')
+    assert argv == [settings.codex_command, "--help", "--model", "gpt-5", "build feature"]
+
+
+def test_runner_rejects_invalid_raw_codex_argv(settings: Settings, store: Store) -> None:
+    runner = Runner(settings, store)
+    with pytest.raises(ValueError):
+        runner._build_argv("codex", '"unterminated')
+
+
 def test_runner_cancel_orphan_running_job(monkeypatch: pytest.MonkeyPatch, settings: Settings, store: Store) -> None:
     job = store.create_job(command="run", prompt="orphan", status="RUNNING")
     store.set_job_pid(job.id, 9001, pid_start_token="token-9001")

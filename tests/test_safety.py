@@ -13,6 +13,7 @@ from telegram_codex_control.store import Store
 def test_requires_confirmation() -> None:
     assert requires_confirmation("autopilot") is True
     assert requires_confirmation("run") is True
+    assert requires_confirmation("codex") is True
 
 
 def test_run_prompt_requires_autopilot_confirmation() -> None:
@@ -39,3 +40,11 @@ def test_safety_confirmation_flow(store: Store) -> None:
     assert consumed.task == "deploy"
 
     assert safety.consume_confirmation(nonce=request.nonce, user_id=1, chat_id=2) is None
+
+
+def test_codex_confirmation_flow(store: Store) -> None:
+    safety = SafetyManager(store, confirmation_ttl_seconds=120)
+    request = safety.request_codex_confirmation(task="--help", user_id=10, chat_id=20)
+    fetched = safety.get_confirmation(nonce=request.nonce, user_id=10, chat_id=20)
+    assert fetched is not None
+    assert fetched.command == "codex"

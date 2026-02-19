@@ -14,7 +14,7 @@ _AUTOPILOT_TRIGGER_RE = re.compile(
 
 
 def requires_confirmation(command: str) -> bool:
-    return command.strip().lower() in {"autopilot", "run"}
+    return command.strip().lower() in {"autopilot", "run", "codex"}
 
 
 def run_prompt_requires_autopilot_confirmation(prompt: str) -> bool:
@@ -56,6 +56,20 @@ class SafetyManager:
     ) -> ConfirmationRequest:
         return self.request_confirmation(
             command="run",
+            task=task,
+            user_id=user_id,
+            chat_id=chat_id,
+        )
+
+    def request_codex_confirmation(
+        self,
+        *,
+        task: str,
+        user_id: int,
+        chat_id: int,
+    ) -> ConfirmationRequest:
+        return self.request_confirmation(
+            command="codex",
             task=task,
             user_id=user_id,
             chat_id=chat_id,

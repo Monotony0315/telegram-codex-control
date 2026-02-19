@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 - 2026-02-19
+- Added webhook transport mode with Telegram `setWebhook` integration and local HTTP receiver.
+- Added command policy engine (`COMMAND_POLICY_PATH`) with per-identity allow/deny controls.
+- Added `/codex <raw args...>` command with confirmation flow for broad Codex CLI coverage.
+- Added secure release pipeline scripts:
+  - `scripts/generate-sbom.sh`
+  - `scripts/sign-artifacts.sh`
+  - `scripts/release-secure.sh`
+- Added GitHub release workflow for tag-based artifact publishing.
+- Added command policy example and expanded test coverage for webhook/policy/codex paths.
+
 ## 0.2.0 - 2026-02-19
 - Added cross-platform service automation:
   - `scripts/install-service.sh`

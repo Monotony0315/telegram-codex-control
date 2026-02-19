@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 import asyncio
 import os
+import shlex
 import signal
 import subprocess
 import time
@@ -41,6 +42,9 @@ class Runner:
 
     async def start_autopilot(self, task: str) -> Job:
         return await self._start_job(command="autopilot", prompt=task)
+
+    async def start_codex(self, raw_args: str) -> Job:
+        return await self._start_job(command="codex", prompt=raw_args)
 
     async def wait_for_current_job(self) -> None:
         task = self._job_task
@@ -153,7 +157,20 @@ class Runner:
             return [self.settings.codex_command, "--", prompt]
         if command == "autopilot":
             return [self.settings.codex_command, "--", f"$autopilot {prompt}"]
+        if command == "codex":
+            parsed_args = self._parse_codex_args(prompt)
+            return [self.settings.codex_command, *parsed_args]
         raise ValueError(f"Unsupported command: {command}")
+
+    @staticmethod
+    def _parse_codex_args(raw_args: str) -> list[str]:
+        try:
+            parsed = shlex.split(raw_args, posix=True)
+        except ValueError as exc:
+            raise ValueError(f"Invalid /codex arguments: {exc}") from exc
+        if not parsed:
+            raise ValueError("Usage: /codex <raw codex args>")
+        return parsed
 
     async def _spawn_process(self, argv: list[str]) -> asyncio.subprocess.Process:
         # Must remain argv-only (`exec`) and never shell interpolation.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import asyncio
+import json
 import re
 
 from telegram_codex_control.bot import TelegramBotDaemon
@@ -46,6 +47,7 @@ class DummyRunner:
     def __init__(self) -> None:
         self.run_calls: list[str] = []
         self.autopilot_calls: list[str] = []
+        self.codex_calls: list[str] = []
         self.cancel_calls = 0
         self._notifier = None
 
@@ -59,6 +61,10 @@ class DummyRunner:
     async def start_autopilot(self, task: str):
         self.autopilot_calls.append(task)
         return type("Job", (), {"id": 202})()
+
+    async def start_codex(self, raw_args: str):
+        self.codex_calls.append(raw_args)
+        return type("Job", (), {"id": 303})()
 
     async def cancel_active_job(self) -> bool:
         self.cancel_calls += 1
@@ -210,6 +216,238 @@ def test_run_requires_confirm_then_runs(settings: Settings, store: Store) -> Non
     }
     _run(bot.handle_update(confirm))
     assert runner.run_calls == ["summarize this"]
+
+
+def test_codex_requires_confirm_then_runs(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    request = {
+        "update_id": 1,
+        "message": {
+            "chat": {"id": settings.allowed_chat_id},
+            "from": {"id": settings.allowed_user_id},
+            "text": "/codex --help",
+        },
+    }
+    _run(bot.handle_update(request))
+
+    assert runner.codex_calls == []
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    match = re.search(r"/confirm ([a-f0-9]+)", sent_texts[-1])
+    assert match is not None
+    nonce = match.group(1)
+
+    confirm = {
+        "update_id": 2,
+        "message": {
+            "chat": {"id": settings.allowed_chat_id},
+            "from": {"id": settings.allowed_user_id},
+            "text": f"/confirm {nonce}",
+        },
+    }
+    _run(bot.handle_update(confirm))
+    assert runner.codex_calls == ["--help"]
+
+
+def test_help_lists_supported_commands(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/help",
+        )
+    )
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert "/codex" in sent_texts[-1]
+
+
+def test_command_policy_can_deny_specific_command(settings: Settings, store: Store, tmp_path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "user_id": settings.allowed_user_id,
+                        "chat_id": settings.allowed_chat_id,
+                        "allow": ["/status", "/logs"],
+                        "deny": ["/run"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    local_settings = replace(settings, command_policy_path=policy_path)
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(local_settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 1,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "/run do-something",
+                },
+            }
+        )
+    )
+    assert runner.run_calls == []
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert "Command denied by policy: /run" == sent_texts[-1]
+
+
+def test_configure_webhook_calls_set_webhook(settings: Settings, store: Store) -> None:
+    local_settings = replace(
+        settings,
+        telegram_transport="webhook",
+        telegram_webhook_public_url="https://bot.example.com",
+        telegram_webhook_path="/telegram/inbound",
+        telegram_webhook_secret_token="secret-token",
+    )
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(local_settings, store, runner, client)
+    _run(bot._configure_webhook())
+
+    calls = [(url, payload) for url, payload in client.calls if url.endswith("/setWebhook")]
+    assert calls
+    _url, payload = calls[-1]
+    assert payload["url"] == "https://bot.example.com/telegram/inbound"
+    assert payload["secret_token"] == "secret-token"
+
+
+def test_run_forever_dispatches_to_webhook_mode(monkeypatch, settings: Settings, store: Store) -> None:
+    local_settings = replace(
+        settings,
+        telegram_transport="webhook",
+        telegram_webhook_public_url="https://bot.example.com",
+    )
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(local_settings, store, runner, client)
+    called = {"webhook": 0}
+
+    async def fake_webhook_forever(*, stop_event=None):  # noqa: ARG001
+        called["webhook"] += 1
+
+    monkeypatch.setattr(bot, "webhook_forever", fake_webhook_forever)
+    _run(bot.run_forever())
+    assert called["webhook"] == 1
+
+
+def test_webhook_http_receiver_accepts_valid_update(settings: Settings, store: Store) -> None:
+    local_settings = replace(
+        settings,
+        telegram_transport="webhook",
+        telegram_webhook_public_url="https://bot.example.com",
+        telegram_webhook_path="/telegram/webhook",
+        telegram_webhook_secret_token="secret-token",
+    )
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(local_settings, store, runner, client)
+
+    async def scenario() -> str:
+        server = await asyncio.start_server(bot._handle_webhook_connection, host="127.0.0.1", port=0)
+        port = server.sockets[0].getsockname()[1]
+        update = {
+            "update_id": 77,
+            "message": {
+                "chat": {"id": settings.allowed_chat_id},
+                "from": {"id": settings.allowed_user_id},
+                "text": "/status",
+            },
+        }
+        raw_body = json.dumps(update).encode("utf-8")
+        request = (
+            b"POST /telegram/webhook HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Content-Type: application/json\r\n"
+            b"X-Telegram-Bot-Api-Secret-Token: secret-token\r\n"
+            + f"Content-Length: {len(raw_body)}\r\n\r\n".encode("ascii")
+            + raw_body
+        )
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(request)
+        await writer.drain()
+        response = await reader.read()
+        writer.close()
+        await writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+        return response.decode("utf-8", errors="replace")
+
+    response_text = _run(scenario())
+    assert "200 OK" in response_text
+    assert store.get_last_update_id() == 77
+
+
+def test_policy_default_rules_apply_to_non_owner_identity(settings: Settings, store: Store, tmp_path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "default": {"allow": ["/status"]},
+                "rules": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    local_settings = replace(settings, command_policy_path=policy_path)
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(local_settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 88,
+                "message": {
+                    "chat": {"id": 9000},
+                    "from": {"id": 9001},
+                    "text": "/status",
+                },
+            }
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert "health: ok" in sent_texts[-1]
+
+
+def test_command_mentions_are_normalized(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 99,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "/status@MonotonyCodexBot",
+                },
+            }
+        )
+    )
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert "health: ok" in sent_texts[-1]
 
 
 def test_confirm_nonce_not_consumed_before_successful_admission(settings: Settings, store: Store) -> None:
