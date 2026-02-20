@@ -62,9 +62,13 @@ if [[ "${LABEL}" != "${LEGACY_LABEL}" ]]; then
 fi
 
 launchctl bootout "${DOMAIN}" "${PLIST_PATH}" >/dev/null 2>&1 || true
-launchctl bootstrap "${DOMAIN}" "${PLIST_PATH}"
-launchctl enable "${DOMAIN}/${LABEL}" || true
-launchctl kickstart -k "${DOMAIN}/${LABEL}"
+if launchctl bootstrap "${DOMAIN}" "${PLIST_PATH}"; then
+  launchctl enable "${DOMAIN}/${LABEL}" || true
+  launchctl kickstart -k "${DOMAIN}/${LABEL}"
+else
+  echo "bootstrap failed; falling back to launchctl load -w" >&2
+  launchctl load -w "${PLIST_PATH}"
+fi
 
 echo "Installed and started ${LABEL}"
 echo "plist: ${PLIST_PATH}"

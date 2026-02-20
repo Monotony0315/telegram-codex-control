@@ -4,6 +4,7 @@
 - Added `CHAT_TURN_TIMEOUT_SECONDS` (default `180`) and applied it to interactive `/chat` turns to prevent long hangs from blocking update processing.
 - Updated subprocess HOME behavior to inherit launcher HOME by default and added optional `SUBPROCESS_HOME` override.
 - Hardened `/chat` post-processing so session persistence failures return `Chat turn failed: ...` instead of generic internal errors.
+- Improved macOS launch-agent install resiliency by falling back to `launchctl load -w` when `bootstrap` intermittently fails.
 - Added/updated tests for chat failure handling, subprocess HOME behavior, and chat timeout config parsing.
 
 ## 0.3.4 - 2026-02-20
