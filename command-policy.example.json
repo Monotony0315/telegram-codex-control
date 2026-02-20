@@ -3,6 +3,11 @@
     "allow": [
       "/status",
       "/chat",
+      "/files",
+      "/search",
+      "/read",
+      "/download",
+      "/report",
       "/logs",
       "/help"
     ]
@@ -21,6 +26,8 @@
       "chat_id": -1002222222222,
       "allow": [
         "/status",
+        "/files",
+        "/read",
         "/logs",
         "/cancel",
         "/help"
@@ -29,7 +36,11 @@
         "/run",
         "/autopilot",
         "/codex",
-        "/chat"
+        "/chat",
+        "/search",
+        "/download",
+        "/report",
+        "/upload"
       ]
     }
   ]

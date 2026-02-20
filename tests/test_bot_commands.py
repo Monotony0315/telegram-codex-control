@@ -19,13 +19,16 @@ def _run(coro):
 
 
 class FakeResponse:
-    def __init__(self, payload: dict):
+    def __init__(self, payload: dict | None = None, *, content: bytes = b""):
         self._payload = payload
+        self.content = content
 
     def raise_for_status(self) -> None:
         return None
 
     def json(self) -> dict:
+        if self._payload is None:
+            return {}
         return self._payload
 
 
@@ -33,14 +36,44 @@ class FakeTelegramClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.updates: list[dict] = []
+        self.file_details: dict[str, dict] = {}
+        self.file_payloads: dict[str, bytes] = {}
 
-    async def post(self, url: str, json: dict) -> FakeResponse:  # noqa: A002
-        self.calls.append((url, json))
+    async def post(
+        self,
+        url: str,
+        json: dict | None = None,  # noqa: A002
+        data: dict | None = None,
+        files: dict | None = None,
+    ) -> FakeResponse:
+        if json is not None:
+            payload = dict(json)
+        else:
+            payload = {}
+            if data is not None:
+                payload["data"] = dict(data)
+            if files is not None:
+                payload["files"] = sorted(files.keys())
+        self.calls.append((url, payload))
         if url.endswith("/getUpdates"):
             return FakeResponse({"ok": True, "result": list(self.updates)})
+        if url.endswith("/getFile"):
+            file_id = payload.get("file_id")
+            result = self.file_details.get(file_id, {})
+            return FakeResponse({"ok": True, "result": result})
         if url.endswith("/sendMessage"):
             return FakeResponse({"ok": True, "result": {"message_id": len(self.calls)}})
+        if url.endswith("/sendDocument"):
+            return FakeResponse({"ok": True, "result": {"message_id": len(self.calls)}})
         return FakeResponse({"ok": True, "result": {}})
+
+    async def get(self, url: str) -> FakeResponse:
+        self.calls.append((url, {"method": "GET"}))
+        file_path = url.rsplit("/bot", 1)[-1]
+        if "/" in file_path:
+            file_path = file_path.split("/", 1)[1]
+        content = self.file_payloads.get(file_path, b"")
+        return FakeResponse(content=content)
 
     async def aclose(self) -> None:
         return None
@@ -278,6 +311,339 @@ def test_help_lists_supported_commands(settings: Settings, store: Store) -> None
     assert sent_texts
     assert "/chat" in sent_texts[-1]
     assert "/codex" in sent_texts[-1]
+    assert "/skill" in sent_texts[-1]
+    assert "/prompt" in sent_texts[-1]
+
+
+def test_files_lists_workspace_entries(settings: Settings, store: Store, workspace_root) -> None:
+    (workspace_root / "src").mkdir()
+    (workspace_root / "README.md").write_text("hello", encoding="utf-8")
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/files",
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert "Entries in ." in sent_texts[-1]
+    assert "- src/" in sent_texts[-1]
+    assert "- README.md" in sent_texts[-1]
+
+
+def test_search_uses_pattern_and_scope(settings: Settings, store: Store, workspace_root, monkeypatch) -> None:
+    (workspace_root / "src").mkdir()
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+    captured: dict[str, object] = {}
+
+    async def fake_ripgrep(*, pattern: str, scope):
+        captured["pattern"] = pattern
+        captured["scope"] = scope
+        return "src/app.py:1:needle"
+
+    monkeypatch.setattr(bot, "_run_ripgrep", fake_ripgrep)
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/search needle src",
+        )
+    )
+
+    assert captured["pattern"] == "needle"
+    assert captured["scope"] == workspace_root / "src"
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts[-1] == "src/app.py:1:needle"
+
+
+def test_read_returns_numbered_lines(settings: Settings, store: Store, workspace_root) -> None:
+    target = workspace_root / "notes.txt"
+    target.write_text("first\nsecond\nthird\n", encoding="utf-8")
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/read notes.txt 2",
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert "notes.txt (3 lines):" in sent_texts[-1]
+    assert "    1: first" in sent_texts[-1]
+    assert "    2: second" in sent_texts[-1]
+    assert "third" not in sent_texts[-1]
+    assert "truncated 1 lines" in sent_texts[-1]
+
+
+def test_download_sends_document(settings: Settings, store: Store, workspace_root) -> None:
+    artifact = workspace_root / "artifact.txt"
+    artifact.write_text("artifact-body", encoding="utf-8")
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/download artifact.txt",
+        )
+    )
+
+    send_document_calls = [payload for url, payload in client.calls if url.endswith("/sendDocument")]
+    assert send_document_calls
+    assert send_document_calls[-1]["data"]["chat_id"] == str(settings.allowed_chat_id)
+    assert send_document_calls[-1]["files"] == ["document"]
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts[-1].startswith("Sent file: artifact.txt ")
+
+
+def test_report_requires_confirm_then_runs_with_planned_path(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 120,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "/report sprint readiness",
+                },
+            }
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    nonce_match = re.search(r"/confirm ([a-f0-9]+)", sent_texts[-1])
+    assert nonce_match is not None
+    nonce = nonce_match.group(1)
+    path_match = re.search(r"Planned path: (reports/[^\n]+\.md)", sent_texts[-1])
+    assert path_match is not None
+    report_path = path_match.group(1)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 121,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": f"/confirm {nonce}",
+                },
+            }
+        )
+    )
+
+    assert runner.run_calls
+    assert f"Topic: sprint readiness" in runner.run_calls[-1]
+    assert f"Output file: {report_path}" in runner.run_calls[-1]
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts[-1] == f"Report job #101 accepted. Planned path: {report_path}"
+
+
+def test_document_upload_downloads_and_saves_file(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    client.file_details["file-1"] = {"file_path": "docs/upload.txt", "file_size": 11}
+    client.file_payloads["docs/upload.txt"] = b"hello world"
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 200,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "document": {
+                        "file_id": "file-1",
+                        "file_name": "upload.txt",
+                        "file_size": 11,
+                    },
+                },
+            }
+        )
+    )
+
+    saved = settings.upload_dir / "upload.txt"
+    assert saved.read_bytes() == b"hello world"
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts[-1] == "Uploaded file saved to .data/uploads/upload.txt (11 bytes)."
+
+
+def test_document_upload_respects_command_policy(settings: Settings, store: Store, tmp_path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "user_id": settings.allowed_user_id,
+                        "chat_id": settings.allowed_chat_id,
+                        "allow": ["/status"],
+                        "deny": [],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    local_settings = replace(settings, command_policy_path=policy_path)
+    client = FakeTelegramClient()
+    client.file_details["file-2"] = {"file_path": "docs/blocked.txt", "file_size": 5}
+    client.file_payloads["docs/blocked.txt"] = b"abcde"
+    runner = DummyRunner()
+    bot = _make_bot(local_settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 201,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "document": {
+                        "file_id": "file-2",
+                        "file_name": "blocked.txt",
+                        "file_size": 5,
+                    },
+                },
+            }
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts[-1] == "Command denied by policy: /upload"
+    assert not (local_settings.upload_dir / "blocked.txt").exists()
+
+
+def test_read_rejects_workspace_escape(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/read ../outside.txt",
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts[-1] == "Path escapes WORKSPACE_ROOT."
+
+
+def test_skill_requires_confirm_then_runs(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    request = {
+        "update_id": 101,
+        "message": {
+            "chat": {"id": settings.allowed_chat_id},
+            "from": {"id": settings.allowed_user_id},
+            "text": "/skill analyze investigate race condition",
+        },
+    }
+    _run(bot.handle_update(request))
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    match = re.search(r"/confirm ([a-f0-9]+)", sent_texts[-1])
+    assert match is not None
+    nonce = match.group(1)
+
+    confirm = {
+        "update_id": 102,
+        "message": {
+            "chat": {"id": settings.allowed_chat_id},
+            "from": {"id": settings.allowed_user_id},
+            "text": f"/confirm {nonce}",
+        },
+    }
+    _run(bot.handle_update(confirm))
+    assert runner.run_calls == ["$analyze investigate race condition"]
+
+
+def test_prompt_requires_confirm_then_runs(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    request = {
+        "update_id": 103,
+        "message": {
+            "chat": {"id": settings.allowed_chat_id},
+            "from": {"id": settings.allowed_user_id},
+            "text": "/prompt architect review auth boundary",
+        },
+    }
+    _run(bot.handle_update(request))
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    match = re.search(r"/confirm ([a-f0-9]+)", sent_texts[-1])
+    assert match is not None
+    nonce = match.group(1)
+
+    confirm = {
+        "update_id": 104,
+        "message": {
+            "chat": {"id": settings.allowed_chat_id},
+            "from": {"id": settings.allowed_user_id},
+            "text": f"/confirm {nonce}",
+        },
+    }
+    _run(bot.handle_update(confirm))
+    assert runner.run_calls == ["/prompts:architect review auth boundary"]
+
+
+def test_skills_and_prompts_list_discovered_items(settings: Settings, store: Store, monkeypatch) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+    monkeypatch.setattr(bot, "_discover_skill_names", lambda: ["analyze", "autopilot", "team"])
+    monkeypatch.setattr(bot, "_discover_prompt_names", lambda: ["architect", "executor"])
+
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/skills auto",
+        )
+    )
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/prompts exec",
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert any("Available skills (1):" in text and "autopilot" in text for text in sent_texts)
+    assert any("Use: /skill <name> <task>" in text for text in sent_texts)
+    assert any("Available prompts (1):" in text and "executor" in text for text in sent_texts)
+    assert any("Use: /prompt <name> <task>" in text for text in sent_texts)
 
 
 def test_plain_text_routes_to_chat_turn(settings: Settings, store: Store) -> None:
@@ -306,6 +672,40 @@ def test_plain_text_routes_to_chat_turn(settings: Settings, store: Store) -> Non
     chat_events = [row for row in rows if row["event_type"] == "chat_turn"]
     assert chat_events
     assert "assistant_len=" in chat_events[-1]["message"]
+
+
+def test_plain_text_chat_reports_session_persistence_failure(
+    settings: Settings,
+    store: Store,
+    monkeypatch,
+) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    def _fail_set_chat_session_thread(*args, **kwargs) -> None:
+        del args, kwargs
+        raise RuntimeError("db write failed")
+
+    monkeypatch.setattr(store, "set_chat_session_thread", _fail_set_chat_session_thread)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 44,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "hello with store failure",
+                },
+            }
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert sent_texts[-1] == "Chat turn failed: db write failed"
+    assert not any("Internal error while handling command." in text for text in sent_texts)
 
 
 def test_plain_text_chat_resumes_saved_thread(settings: Settings, store: Store) -> None:

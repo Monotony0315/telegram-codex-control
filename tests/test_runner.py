@@ -34,6 +34,7 @@ def test_runner_enforces_single_active_job(settings: Settings, store: Store) -> 
 
 def test_runner_uses_exec_not_shell(monkeypatch: pytest.MonkeyPatch, settings: Settings, store: Store) -> None:
     seen: dict[str, object] = {}
+    monkeypatch.setenv("HOME", "/tmp/runner-home")
 
     class _FakeStream:
         async def readline(self) -> bytes:
@@ -82,7 +83,7 @@ def test_runner_uses_exec_not_shell(monkeypatch: pytest.MonkeyPatch, settings: S
     assert args[1] == "--"
     assert args[2] == "hello"
     assert kwargs["cwd"] == str(settings.workspace_root)
-    assert kwargs["env"]["HOME"] == str(settings.workspace_root)
+    assert kwargs["env"]["HOME"] == "/tmp/runner-home"
     assert "shell" not in kwargs
 
 

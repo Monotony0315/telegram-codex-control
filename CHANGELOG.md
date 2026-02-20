@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.4 - 2026-02-20
+- Added discovery and execution shortcuts for Codex capabilities:
+  - `/skills [filter]`, `/skill <name> <task>`
+  - `/prompts [filter]`, `/prompt <name> <task>`
+- Extended confirmation flow to support `skill` and `prompt` job types.
+- Added subprocess environment passthrough controls for AI/tool integrations:
+  - built-in allowlist for common provider/config keys
+  - `SUBPROCESS_ENV_ALLOWLIST`, `SUBPROCESS_ENV_PREFIX_ALLOWLIST`
+  - `SUBPROCESS_HOME` override (default now inherits launcher HOME for better Codex session stability)
+  - explicit blocklist for Telegram bot secrets
+- Hardened `/chat` handling so post-response session/log persistence failures return a chat error message instead of a generic internal error.
+- Added tests for new command flows and subprocess env passthrough behavior.
+
 ## 0.3.3 - 2026-02-19
 - Improved chat observability by recording `assistant_len` in `chat_turn` events.
 - Added explicit `chat_empty_response` event when assistant output is empty.

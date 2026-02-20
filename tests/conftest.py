@@ -22,6 +22,7 @@ def settings(tmp_path: Path, workspace_root: Path) -> Settings:
         allowed_user_id=1111,
         allowed_chat_id=2222,
         workspace_root=workspace_root,
+        upload_dir=workspace_root / ".data" / "uploads",
         db_path=tmp_path / "state.db",
         audit_log_path=tmp_path / "audit.jsonl",
         codex_command="codex",
@@ -39,6 +40,10 @@ def settings(tmp_path: Path, workspace_root: Path) -> Settings:
         telegram_webhook_listen_port=8080,
         telegram_webhook_path="/telegram/webhook",
         telegram_webhook_secret_token=None,
+        subprocess_env_allowlist=(),
+        subprocess_env_prefix_allowlist=(),
+        max_download_file_size_bytes=5 * 1024 * 1024,
+        max_upload_file_size_bytes=5 * 1024 * 1024,
         command_policy_path=None,
     )
 

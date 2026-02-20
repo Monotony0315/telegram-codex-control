@@ -52,6 +52,54 @@ def _parse_bool(env: Mapping[str, str], name: str, default: bool) -> bool:
     raise ConfigError(f"Invalid boolean for {name}: {raw}")
 
 
+def _parse_csv_tokens(env: Mapping[str, str], name: str) -> tuple[str, ...]:
+    raw = env.get(name)
+    if raw is None:
+        return ()
+    tokens: list[str] = []
+    for chunk in raw.split(","):
+        candidate = chunk.strip().upper()
+        if not candidate:
+            continue
+        if any(ch.isspace() for ch in candidate):
+            raise ConfigError(f"Invalid token in {name}: {chunk!r}")
+        if candidate not in tokens:
+            tokens.append(candidate)
+    return tuple(tokens)
+
+
+_DEFAULT_SUBPROCESS_ENV_ALLOWLIST = (
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_API_VERSION",
+    "CODEX_HOME",
+    "CODEX_CONFIG_HOME",
+    "CODEX_API_KEY",
+    "CODEX_MODEL",
+    "OMX_HOME",
+    "OMX_CONFIG_DIR",
+)
+_BLOCKED_SUBPROCESS_ENV = frozenset(
+    {
+        "TELEGRAM_BOT_TOKEN",
+        "ALLOWED_USER_ID",
+        "ALLOWED_CHAT_ID",
+        "TELEGRAM_WEBHOOK_SECRET_TOKEN",
+    }
+)
+
+
 def _resolve_path(path_value: str, base_dir: Path) -> Path:
     candidate = Path(path_value).expanduser()
     if not candidate.is_absolute():
@@ -65,6 +113,7 @@ class Settings:
     allowed_user_id: int
     allowed_chat_id: int
     workspace_root: Path
+    upload_dir: Path
     db_path: Path
     audit_log_path: Path
     codex_command: str
@@ -82,6 +131,10 @@ class Settings:
     telegram_webhook_listen_port: int
     telegram_webhook_path: str
     telegram_webhook_secret_token: str | None
+    subprocess_env_allowlist: tuple[str, ...]
+    subprocess_env_prefix_allowlist: tuple[str, ...]
+    max_download_file_size_bytes: int
+    max_upload_file_size_bytes: int
     command_policy_path: Path | None
 
     @property
@@ -102,8 +155,34 @@ class Settings:
             if value:
                 allowed[key] = value
 
-        # Pin HOME to workspace to reduce accidental filesystem spillover.
-        allowed["HOME"] = str(self.workspace_root)
+        # Keep HOME compatible with local Codex/OMX config unless explicitly overridden.
+        subprocess_home = os.environ.get("SUBPROCESS_HOME", "").strip()
+        if subprocess_home:
+            allowed["HOME"] = str(Path(subprocess_home).expanduser().resolve())
+        else:
+            inherited_home = os.environ.get("HOME")
+            if inherited_home:
+                allowed["HOME"] = inherited_home
+            else:
+                allowed["HOME"] = str(Path.home())
+
+        env_names = set(_DEFAULT_SUBPROCESS_ENV_ALLOWLIST)
+        env_names.update(self.subprocess_env_allowlist)
+        for key in sorted(env_names):
+            if key in _BLOCKED_SUBPROCESS_ENV:
+                continue
+            value = os.environ.get(key)
+            if value:
+                allowed[key] = value
+
+        for prefix in self.subprocess_env_prefix_allowlist:
+            for key, value in os.environ.items():
+                if key in _BLOCKED_SUBPROCESS_ENV:
+                    continue
+                if key in allowed:
+                    continue
+                if key.startswith(prefix) and value:
+                    allowed[key] = value
 
         claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
         if claude_config_dir:
@@ -131,6 +210,13 @@ class Settings:
             raise ConfigError(f"WORKSPACE_ROOT does not exist: {workspace_root}")
         if not workspace_root.is_dir():
             raise ConfigError(f"WORKSPACE_ROOT is not a directory: {workspace_root}")
+        upload_dir_raw = raw_env.get("UPLOAD_DIR", ".data/uploads").strip() or ".data/uploads"
+        upload_dir_candidate = Path(upload_dir_raw).expanduser()
+        if not upload_dir_candidate.is_absolute():
+            upload_dir_candidate = workspace_root / upload_dir_candidate
+        upload_dir = upload_dir_candidate.resolve()
+        if not upload_dir.is_relative_to(workspace_root):
+            raise ConfigError("UPLOAD_DIR must resolve within WORKSPACE_ROOT")
 
         db_path = _resolve_path(raw_env.get("DB_PATH", ".data/state.db"), root_dir)
         audit_log_path = _resolve_path(raw_env.get("AUDIT_LOG_PATH", ".data/audit.jsonl"), root_dir)
@@ -152,12 +238,17 @@ class Settings:
         telegram_webhook_listen_port = _parse_int(raw_env, "TELEGRAM_WEBHOOK_LISTEN_PORT", 8080)
         telegram_webhook_path = raw_env.get("TELEGRAM_WEBHOOK_PATH", "/telegram/webhook").strip()
         telegram_webhook_secret_token = raw_env.get("TELEGRAM_WEBHOOK_SECRET_TOKEN", "").strip() or None
+        subprocess_env_allowlist = _parse_csv_tokens(raw_env, "SUBPROCESS_ENV_ALLOWLIST")
+        subprocess_env_prefix_allowlist = _parse_csv_tokens(raw_env, "SUBPROCESS_ENV_PREFIX_ALLOWLIST")
+        max_download_file_size_bytes = _parse_int(raw_env, "MAX_DOWNLOAD_FILE_SIZE_BYTES", 5 * 1024 * 1024)
+        max_upload_file_size_bytes = _parse_int(raw_env, "MAX_UPLOAD_FILE_SIZE_BYTES", 5 * 1024 * 1024)
 
         settings = cls(
             telegram_bot_token=_require(raw_env, "TELEGRAM_BOT_TOKEN"),
             allowed_user_id=_parse_int(raw_env, "ALLOWED_USER_ID"),
             allowed_chat_id=_parse_int(raw_env, "ALLOWED_CHAT_ID"),
             workspace_root=workspace_root,
+            upload_dir=upload_dir,
             db_path=db_path,
             audit_log_path=audit_log_path,
             codex_command=raw_env.get("CODEX_COMMAND", "codex"),
@@ -175,6 +266,10 @@ class Settings:
             telegram_webhook_listen_port=telegram_webhook_listen_port,
             telegram_webhook_path=telegram_webhook_path,
             telegram_webhook_secret_token=telegram_webhook_secret_token,
+            subprocess_env_allowlist=subprocess_env_allowlist,
+            subprocess_env_prefix_allowlist=subprocess_env_prefix_allowlist,
+            max_download_file_size_bytes=max_download_file_size_bytes,
+            max_upload_file_size_bytes=max_upload_file_size_bytes,
             command_policy_path=command_policy_path,
         )
 
@@ -199,6 +294,10 @@ class Settings:
             raise ConfigError("JOB_TIMEOUT_SECONDS must be greater than 0")
         if settings.confirmation_ttl_seconds <= 0:
             raise ConfigError("CONFIRMATION_TTL_SECONDS must be greater than 0")
+        if settings.max_download_file_size_bytes <= 0:
+            raise ConfigError("MAX_DOWNLOAD_FILE_SIZE_BYTES must be greater than 0")
+        if settings.max_upload_file_size_bytes <= 0:
+            raise ConfigError("MAX_UPLOAD_FILE_SIZE_BYTES must be greater than 0")
         if not settings.codex_command.strip():
             raise ConfigError("CODEX_COMMAND must not be empty")
         if settings.telegram_transport not in {"polling", "webhook"}:
@@ -213,6 +312,8 @@ class Settings:
             raise ConfigError("TELEGRAM_WEBHOOK_PATH must not contain spaces")
         if settings.telegram_webhook_secret_token and len(settings.telegram_webhook_secret_token) > 256:
             raise ConfigError("TELEGRAM_WEBHOOK_SECRET_TOKEN must be <= 256 characters")
+        if settings.upload_dir.exists() and not settings.upload_dir.is_dir():
+            raise ConfigError(f"UPLOAD_DIR is not a directory: {settings.upload_dir}")
         if settings.telegram_transport == "webhook":
             if settings.telegram_webhook_public_url is None:
                 raise ConfigError("TELEGRAM_WEBHOOK_PUBLIC_URL is required when TELEGRAM_TRANSPORT=webhook")

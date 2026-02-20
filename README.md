@@ -11,6 +11,15 @@ Keywords: `telegram bot`, `codex cli`, `remote development`, `developer automati
   - `/run <prompt>` (confirm required)
   - `/autopilot <task>` (confirm required)
   - `/codex <raw args...>` (confirm required)
+  - `/files [relative_dir]`
+  - `/search <pattern> [relative_dir_or_file]`
+  - `/read <relative_file> [max_lines]`
+  - `/download <relative_file>`
+  - `/report <topic>` (confirm required; runs a report-writing `/run` prompt targeting `reports/`)
+  - `/skills [filter]`
+  - `/skill <name> <task>` (confirm required)
+  - `/prompts [filter]`
+  - `/prompt <name> <task>` (confirm required)
   - `/confirm <nonce>`
   - `/cancel`
   - `/logs`
@@ -21,6 +30,7 @@ Keywords: `telegram bot`, `codex cli`, `remote development`, `developer automati
 - Security:
   - strict user/chat allowlist
   - optional command policy (`COMMAND_POLICY_PATH`)
+  - Telegram document upload ingestion to workspace (`/upload` policy gate)
   - argv-only subprocess execution (`create_subprocess_exec`, no shell)
   - token/secret redaction in logs and outbound messages
 - Operations:
@@ -40,6 +50,7 @@ TELEGRAM_BOT_TOKEN=123456:replace-me
 ALLOWED_USER_ID=123456789
 ALLOWED_CHAT_ID=123456789
 WORKSPACE_ROOT=$HOME/Projects
+UPLOAD_DIR=.data/uploads
 CODEX_COMMAND=/absolute/path/to/codex
 TELEGRAM_INTERACTIVE_MODE=true
 TELEGRAM_TRANSPORT=polling
@@ -76,10 +87,15 @@ Use `command-policy.example.json` as a template.
 Example:
 ```json
 {
-  "default": { "allow": ["/status", "/chat", "/logs", "/help"] },
+  "default": { "allow": ["/status", "/chat", "/files", "/search", "/read", "/download", "/report", "/logs", "/help"] },
   "rules": [
     { "user_id": 123, "chat_id": 456, "allow": ["*"], "deny": [] },
-    { "user_id": 111, "chat_id": -100222, "allow": ["/status", "/logs"], "deny": ["/run", "/autopilot", "/codex", "/chat"] }
+    {
+      "user_id": 111,
+      "chat_id": -100222,
+      "allow": ["/status", "/files", "/read", "/logs"],
+      "deny": ["/run", "/autopilot", "/codex", "/chat", "/search", "/download", "/report", "/upload"]
+    }
   ]
 }
 ```
@@ -121,6 +137,7 @@ For GitHub tag releases, workflow requires `RELEASE_PRIVATE_KEY_PEM` secret and 
 - `ALLOWED_USER_ID` (required int)
 - `ALLOWED_CHAT_ID` (required int)
 - `WORKSPACE_ROOT` (default: `~/Projects` if exists, else `~`)
+- `UPLOAD_DIR` (default: `.data/uploads`, must resolve under `WORKSPACE_ROOT`)
 - `DB_PATH` (default: `.data/state.db`)
 - `AUDIT_LOG_PATH` (default: `.data/audit.jsonl`)
 - `CODEX_COMMAND` (default: `codex`)
@@ -136,8 +153,13 @@ For GitHub tag releases, workflow requires `RELEASE_PRIVATE_KEY_PEM` secret and 
 - `POLL_RETRY_BASE_SECONDS` (default `1.0`)
 - `POLL_RETRY_MAX_SECONDS` (default `30.0`)
 - `JOB_TIMEOUT_SECONDS` (default `7200`)
+- `SUBPROCESS_ENV_ALLOWLIST` (optional CSV env names to pass into Codex subprocess)
+- `SUBPROCESS_ENV_PREFIX_ALLOWLIST` (optional CSV env name prefixes to pass into Codex subprocess)
+- `SUBPROCESS_HOME` (optional absolute/relative path override for subprocess `HOME`; default inherits launcher `HOME`)
 - `CONFIRMATION_TTL_SECONDS` (default `300`)
 - `MESSAGE_CHUNK_SIZE` (default `3500`)
+- `MAX_DOWNLOAD_FILE_SIZE_BYTES` (default `5242880`)
+- `MAX_UPLOAD_FILE_SIZE_BYTES` (default `5242880`)
 - `TELEGRAM_API_BASE` (default `https://api.telegram.org`)
 
 ## Testing
