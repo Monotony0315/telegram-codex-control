@@ -31,6 +31,7 @@ def settings(tmp_path: Path, workspace_root: Path) -> Settings:
         poll_retry_base_seconds=0.01,
         poll_retry_max_seconds=0.1,
         job_timeout_seconds=30,
+        chat_turn_timeout_seconds=30,
         confirmation_ttl_seconds=120,
         message_chunk_size=3500,
         telegram_api_base="https://api.telegram.org",

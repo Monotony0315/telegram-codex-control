@@ -153,6 +153,7 @@ For GitHub tag releases, workflow requires `RELEASE_PRIVATE_KEY_PEM` secret and 
 - `POLL_RETRY_BASE_SECONDS` (default `1.0`)
 - `POLL_RETRY_MAX_SECONDS` (default `30.0`)
 - `JOB_TIMEOUT_SECONDS` (default `7200`)
+- `CHAT_TURN_TIMEOUT_SECONDS` (default `180`, timeout for interactive `/chat` turns)
 - `SUBPROCESS_ENV_ALLOWLIST` (optional CSV env names to pass into Codex subprocess)
 - `SUBPROCESS_ENV_PREFIX_ALLOWLIST` (optional CSV env name prefixes to pass into Codex subprocess)
 - `SUBPROCESS_HOME` (optional absolute/relative path override for subprocess `HOME`; default inherits launcher `HOME`)

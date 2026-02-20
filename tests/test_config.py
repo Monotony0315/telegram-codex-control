@@ -190,6 +190,30 @@ def test_from_env_parses_upload_dir_and_size_limits(workspace_root: Path) -> Non
     assert settings.max_upload_file_size_bytes == 1024
 
 
+def test_from_env_parses_chat_turn_timeout(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "CHAT_TURN_TIMEOUT_SECONDS": "45",
+    }
+    settings = Settings.from_env(env=env, base_dir=workspace_root)
+    assert settings.chat_turn_timeout_seconds == 45
+
+
+def test_from_env_rejects_invalid_chat_turn_timeout(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "CHAT_TURN_TIMEOUT_SECONDS": "0",
+    }
+    with pytest.raises(ConfigError):
+        Settings.from_env(env=env, base_dir=workspace_root)
+
+
 def test_from_env_rejects_upload_dir_outside_workspace(workspace_root: Path, tmp_path: Path) -> None:
     env = {
         "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",

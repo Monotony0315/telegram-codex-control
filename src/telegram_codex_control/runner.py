@@ -77,7 +77,7 @@ class Runner:
             try:
                 stdout_raw, stderr_raw = await asyncio.wait_for(
                     process.communicate(),
-                    timeout=float(self.settings.job_timeout_seconds),
+                    timeout=float(self.settings.chat_turn_timeout_seconds),
                 )
             except asyncio.TimeoutError as exc:
                 await self._cancel_process(process)

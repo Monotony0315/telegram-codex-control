@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5 - 2026-02-20
+- Added `CHAT_TURN_TIMEOUT_SECONDS` (default `180`) and applied it to interactive `/chat` turns to prevent long hangs from blocking update processing.
+- Updated subprocess HOME behavior to inherit launcher HOME by default and added optional `SUBPROCESS_HOME` override.
+- Hardened `/chat` post-processing so session persistence failures return `Chat turn failed: ...` instead of generic internal errors.
+- Added/updated tests for chat failure handling, subprocess HOME behavior, and chat timeout config parsing.
+
 ## 0.3.4 - 2026-02-20
 - Added discovery and execution shortcuts for Codex capabilities:
   - `/skills [filter]`, `/skill <name> <task>`
@@ -11,6 +17,7 @@
   - `SUBPROCESS_HOME` override (default now inherits launcher HOME for better Codex session stability)
   - explicit blocklist for Telegram bot secrets
 - Hardened `/chat` handling so post-response session/log persistence failures return a chat error message instead of a generic internal error.
+- Added `CHAT_TURN_TIMEOUT_SECONDS` to cap interactive `/chat` latency and prevent long-running chat turns from stalling update processing.
 - Added tests for new command flows and subprocess env passthrough behavior.
 
 ## 0.3.3 - 2026-02-19

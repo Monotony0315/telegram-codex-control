@@ -122,6 +122,7 @@ class Settings:
     poll_retry_base_seconds: float
     poll_retry_max_seconds: float
     job_timeout_seconds: int
+    chat_turn_timeout_seconds: int
     confirmation_ttl_seconds: int
     message_chunk_size: int
     telegram_api_base: str
@@ -257,6 +258,7 @@ class Settings:
             poll_retry_base_seconds=_parse_float(raw_env, "POLL_RETRY_BASE_SECONDS", 1.0),
             poll_retry_max_seconds=_parse_float(raw_env, "POLL_RETRY_MAX_SECONDS", 30.0),
             job_timeout_seconds=_parse_int(raw_env, "JOB_TIMEOUT_SECONDS", 7200),
+            chat_turn_timeout_seconds=_parse_int(raw_env, "CHAT_TURN_TIMEOUT_SECONDS", 180),
             confirmation_ttl_seconds=_parse_int(raw_env, "CONFIRMATION_TTL_SECONDS", 300),
             message_chunk_size=chunk_size,
             telegram_api_base=raw_env.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/"),
@@ -292,6 +294,8 @@ class Settings:
             raise ConfigError("POLL_RETRY_MAX_SECONDS must be >= POLL_RETRY_BASE_SECONDS")
         if settings.job_timeout_seconds <= 0:
             raise ConfigError("JOB_TIMEOUT_SECONDS must be greater than 0")
+        if settings.chat_turn_timeout_seconds <= 0:
+            raise ConfigError("CHAT_TURN_TIMEOUT_SECONDS must be greater than 0")
         if settings.confirmation_ttl_seconds <= 0:
             raise ConfigError("CONFIRMATION_TTL_SECONDS must be greater than 0")
         if settings.max_download_file_size_bytes <= 0:
