@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hmac
 import json
@@ -15,7 +16,13 @@ import httpx
 from .auth import Authorizer, extract_message_identity
 from .command_policy import CommandPolicy
 from .config import Settings
-from .runner import Runner
+from .live_events import ExecutionEvent
+from .live_renderer import TelegramLiveRenderer
+from .network_diagnostics import (
+    build_dns_network_restriction_guidance,
+    is_dns_network_restriction_error,
+)
+from .runner import Runner, RunnerNotification
 from .safety import SafetyManager, run_prompt_requires_autopilot_confirmation
 from .store import ActiveJobExistsError, Store
 from .utils import chunk_text, format_status, redact_text
@@ -37,6 +44,33 @@ MAX_SEARCH_OUTPUT_LINES = 200
 MAX_SEARCH_OUTPUT_CHARS = 12000
 RG_TIMEOUT_SECONDS = 5.0
 RG_MAX_MATCHES = 500
+
+
+@dataclass(frozen=True, slots=True)
+class CommandSkillAlias:
+    command: str
+    requires_task: bool
+    category: str
+    description: str
+
+
+COMMAND_SKILL_ALIASES: dict[str, CommandSkillAlias] = {
+    "cmd-status": CommandSkillAlias("/status", False, "Monitoring", "Show bot health and active job"),
+    "cmd-chat": CommandSkillAlias("/chat", False, "Chat", "Open chat session or send a chat message"),
+    "cmd-run": CommandSkillAlias("/run", True, "Execution", "Run a one-off prompt with confirmation"),
+    "cmd-autopilot": CommandSkillAlias("/autopilot", True, "Execution", "Run an autopilot task with confirmation"),
+    "cmd-codex": CommandSkillAlias("/codex", True, "Execution", "Run raw codex arguments with confirmation"),
+    "cmd-files": CommandSkillAlias("/files", False, "Workspace", "List files in a workspace directory"),
+    "cmd-search": CommandSkillAlias("/search", True, "Workspace", "Search text in files with ripgrep"),
+    "cmd-read": CommandSkillAlias("/read", True, "Workspace", "Read workspace file content"),
+    "cmd-download": CommandSkillAlias("/download", True, "Workspace", "Download a workspace file"),
+    "cmd-report": CommandSkillAlias("/report", True, "Reports", "Generate a report via /run"),
+    "cmd-cancel": CommandSkillAlias("/cancel", False, "Control", "Request cancellation for active job"),
+    "cmd-logs": CommandSkillAlias("/logs", False, "Control", "Show recent audit logs"),
+    "cmd-help": CommandSkillAlias("/help", False, "Help", "Show help and command guide"),
+    "cmd-skills": CommandSkillAlias("/skills", False, "Discovery", "List available skills"),
+    "cmd-prompts": CommandSkillAlias("/prompts", False, "Discovery", "List available prompts"),
+}
 
 
 class TelegramBotDaemon:
@@ -70,9 +104,10 @@ class TelegramBotDaemon:
         self._owns_client = client is None
         self._last_unauthorized_reply_at = 0.0
         self._unauthorized_reply_interval_seconds = 10.0
-        self.runner.set_notifier(self.send_to_allowed_chat)
+        self.runner.set_notifier(self._handle_runner_notification)
         self._webhook_server: asyncio.base_events.Server | None = None
         self._update_lock = asyncio.Lock()
+        self._active_live_renderers: dict[str, TelegramLiveRenderer] = {}
 
     async def close(self) -> None:
         if self._webhook_server is not None:
@@ -231,6 +266,7 @@ class TelegramBotDaemon:
 
     async def handle_command(self, *, chat_id: int, user_id: int, text: str) -> None:
         command, arg = self._parse_command(text)
+        owner_key = self._owner_key(chat_id)
         if command == "/help":
             await self.send_message(
                 chat_id,
@@ -252,7 +288,7 @@ class TelegramBotDaemon:
             return
 
         if command == "/status":
-            active_job = self.store.get_active_job()
+            active_job = self.store.get_active_job(owner_key=owner_key) or self.store.get_active_job()
             status_text = format_status(self.runner.uptime_seconds(), active_job)
             await self.send_message(chat_id, status_text)
             return
@@ -333,7 +369,25 @@ class TelegramBotDaemon:
 
             try:
                 existing_thread_id = self.store.get_chat_session_thread(user_id=user_id, chat_id=chat_id)
-                result = await self.runner.run_chat_turn(prompt=normalized_arg, thread_id=existing_thread_id)
+                live_renderer = await self._start_live_renderer(
+                    owner_key=owner_key,
+                    chat_id=chat_id,
+                    initial_text="Thinking...",
+                )
+                heartbeat_stop = asyncio.Event()
+                heartbeat_task = asyncio.create_task(
+                    self._run_live_typing_loop(live_renderer=live_renderer, stop_event=heartbeat_stop)
+                )
+                try:
+                    result = await self._run_chat_turn_with_live_renderer(
+                        prompt=normalized_arg,
+                        thread_id=existing_thread_id,
+                        live_renderer=live_renderer,
+                        owner_key=owner_key,
+                    )
+                finally:
+                    heartbeat_stop.set()
+                    await asyncio.gather(heartbeat_task, return_exceptions=True)
                 self.store.set_chat_session_thread(
                     user_id=user_id,
                     chat_id=chat_id,
@@ -349,10 +403,44 @@ class TelegramBotDaemon:
                     ),
                 )
             except ActiveJobExistsError:
-                await self.send_message(chat_id, "A job is already running.")
+                await self._finalize_live_renderer(owner_key=owner_key, text="A job is already running.")
                 return
             except Exception as exc:
-                await self.send_message(chat_id, f"Chat turn failed: {redact_text(str(exc))}")
+                message = redact_text(str(exc))
+                if "Chat turn timed out" in message:
+                    self.store.add_event(
+                        None,
+                        "chat_turn_timeout",
+                        (
+                            f"user={user_id} chat={chat_id} timeout={self.settings.chat_turn_timeout_seconds}s "
+                            f"progress_timeout={self.settings.chat_turn_progress_timeout_seconds}s "
+                            f"retries={self.settings.chat_turn_retry_count}"
+                        ),
+                    )
+                    await self._finalize_live_renderer(
+                        owner_key=owner_key,
+                        text=(
+                            "Chat response timed out, but the run may still be active.\n"
+                            "Please retry to resume (including any partial response), use /chat reset for a fresh "
+                            "session, or increase CHAT_TURN_TIMEOUT_SECONDS / "
+                            "CHAT_TURN_PROGRESS_TIMEOUT_SECONDS."
+                        ),
+                    )
+                    return
+                if is_dns_network_restriction_error(message):
+                    self.store.add_event(
+                        None,
+                        "chat_turn_network_restricted",
+                        redact_text(
+                            f"user={user_id} chat={chat_id} message={self._preview_text(message, limit=240)}"
+                        ),
+                    )
+                    await self._finalize_live_renderer(
+                        owner_key=owner_key,
+                        text=build_dns_network_restriction_guidance(failure_detail=message),
+                    )
+                    return
+                await self._finalize_live_renderer(owner_key=owner_key, text=f"Chat turn failed: {message}")
                 return
             assistant_text = result.assistant_text.strip() or "No response."
             if assistant_text == "No response.":
@@ -362,7 +450,7 @@ class TelegramBotDaemon:
                     f"user={user_id} chat={chat_id} thread_id={result.thread_id}",
                 )
                 assistant_text = "No response from Codex. Please retry, or run /chat reset."
-            await self.send_message(chat_id, assistant_text)
+            await self._finalize_live_renderer(owner_key=owner_key, text=assistant_text)
             return
 
         if command == "/run":
@@ -430,11 +518,18 @@ class TelegramBotDaemon:
             return
 
         if command == "/skill":
-            parsed = self._parse_named_invocation(arg)
+            parsed = self._parse_named_invocation(arg, require_task=False)
             if parsed is None:
                 await self.send_message(chat_id, "Usage: /skill <name> <task>")
                 return
             skill_name, task = parsed
+            command_alias = COMMAND_SKILL_ALIASES.get(skill_name)
+            if command_alias is None and not task:
+                await self.send_message(chat_id, "Usage: /skill <name> <task>")
+                return
+            if command_alias is not None and command_alias.requires_task and not task:
+                await self.send_message(chat_id, f"Usage: /skill {skill_name} <task>")
+                return
             payload = self._encode_named_invocation_payload(kind="skill", name=skill_name, task=task)
             request = self.safety.request_confirmation(
                 command="skill",
@@ -448,7 +543,7 @@ class TelegramBotDaemon:
                     "Confirmation required for /skill.\n"
                     f"Run: /confirm {request.nonce}\n"
                     f"Skill: {skill_name}\n"
-                    f"Task: {self._preview_text(task)}\n"
+                    f"Task: {self._preview_text(task) if task else '(none)'}\n"
                     f"Expires: {request.expires_at}"
                 ),
             )
@@ -494,22 +589,67 @@ class TelegramBotDaemon:
             accepted_message = ""
             try:
                 if confirmation.command == "run":
-                    job = await self.runner.start_run(confirmation.task)
+                    job = await self._runner_start_run(confirmation.task, owner_key=owner_key)
+                    await self._activate_job_live_renderer(
+                        owner_key=owner_key,
+                        chat_id=chat_id,
+                        title=f"Run job #{job.id} running...",
+                    )
                     accepted_message = f"Run job #{job.id} accepted."
                 elif confirmation.command == "autopilot":
-                    job = await self.runner.start_autopilot(confirmation.task)
+                    job = await self._runner_start_autopilot(confirmation.task, owner_key=owner_key)
+                    await self._activate_job_live_renderer(
+                        owner_key=owner_key,
+                        chat_id=chat_id,
+                        title=f"Autopilot job #{job.id} running...",
+                    )
                     accepted_message = f"Autopilot job #{job.id} accepted."
                 elif confirmation.command == "codex":
-                    job = await self.runner.start_codex(confirmation.task)
+                    job = await self._runner_start_codex(confirmation.task, owner_key=owner_key)
+                    await self._activate_job_live_renderer(
+                        owner_key=owner_key,
+                        chat_id=chat_id,
+                        title=f"Codex job #{job.id} running...",
+                    )
                     accepted_message = f"Codex job #{job.id} accepted."
                 elif confirmation.command == "skill":
-                    parsed = self._decode_named_invocation_payload(payload=confirmation.task, expected_kind="skill")
+                    parsed = self._decode_named_invocation_payload(
+                        payload=confirmation.task,
+                        expected_kind="skill",
+                        require_task=False,
+                    )
                     if parsed is None:
                         await self.send_message(chat_id, "Invalid /skill confirmation payload.")
                         return
                     skill_name, task = parsed
+                    command_skill_text = self._compose_command_skill_text(skill_name=skill_name, task=task)
+                    if skill_name in COMMAND_SKILL_ALIASES:
+                        if command_skill_text is None:
+                            await self.send_message(chat_id, "Invalid /skill confirmation payload.")
+                            return
+                        await self.handle_command(chat_id=chat_id, user_id=user_id, text=command_skill_text)
+                        consumed = self.safety.consume_confirmation(
+                            nonce=arg,
+                            user_id=user_id,
+                            chat_id=chat_id,
+                        )
+                        if consumed is None:
+                            self.store.add_event(
+                                None,
+                                "confirmation_consume_race",
+                                "Confirmation was not consumable after command-skill dispatch",
+                            )
+                        return
+                    if not task:
+                        await self.send_message(chat_id, "Invalid /skill confirmation payload.")
+                        return
                     composed_prompt = f"${skill_name} {task}".strip()
-                    job = await self.runner.start_run(composed_prompt)
+                    job = await self._runner_start_run(composed_prompt, owner_key=owner_key)
+                    await self._activate_job_live_renderer(
+                        owner_key=owner_key,
+                        chat_id=chat_id,
+                        title=f"Skill job #{job.id} running...",
+                    )
                     accepted_message = f"Skill job #{job.id} accepted."
                 elif confirmation.command == "prompt":
                     parsed = self._decode_named_invocation_payload(payload=confirmation.task, expected_kind="prompt")
@@ -518,7 +658,12 @@ class TelegramBotDaemon:
                         return
                     prompt_name, task = parsed
                     composed_prompt = f"/prompts:{prompt_name} {task}".strip()
-                    job = await self.runner.start_run(composed_prompt)
+                    job = await self._runner_start_run(composed_prompt, owner_key=owner_key)
+                    await self._activate_job_live_renderer(
+                        owner_key=owner_key,
+                        chat_id=chat_id,
+                        title=f"Prompt job #{job.id} running...",
+                    )
                     accepted_message = f"Prompt job #{job.id} accepted."
                 elif confirmation.command == "report":
                     parsed = self._decode_report_payload(confirmation.task)
@@ -527,7 +672,12 @@ class TelegramBotDaemon:
                         return
                     report_topic, report_path = parsed
                     prompt = self._build_report_prompt(topic=report_topic, relative_report_path=report_path)
-                    job = await self.runner.start_run(prompt)
+                    job = await self._runner_start_run(prompt, owner_key=owner_key)
+                    await self._activate_job_live_renderer(
+                        owner_key=owner_key,
+                        chat_id=chat_id,
+                        title=f"Report job #{job.id} running...",
+                    )
                     accepted_message = f"Report job #{job.id} accepted. Planned path: {report_path}"
                 else:
                     await self.send_message(chat_id, f"Unsupported confirmation command: {confirmation.command}")
@@ -553,10 +703,12 @@ class TelegramBotDaemon:
             return
 
         if command == "/cancel":
-            cancelled = await self.runner.cancel_active_job()
+            cancelled = await self._runner_cancel_active_job(owner_key=owner_key)
+            if not cancelled and owner_key != "global":
+                cancelled = await self._runner_cancel_active_job(owner_key="global")
             if cancelled:
                 await self.send_message(chat_id, "Cancellation request sent.")
-            elif self.store.get_active_job() is not None:
+            elif self.store.get_active_job(owner_key=owner_key) is not None or self.store.get_active_job() is not None:
                 await self.send_message(chat_id, "Cancellation blocked or still in progress. Check /logs.")
             else:
                 await self.send_message(chat_id, "No active job.")
@@ -577,6 +729,137 @@ class TelegramBotDaemon:
 
     async def send_to_allowed_chat(self, text: str) -> None:
         await self.send_message(self.settings.allowed_chat_id, text)
+
+    async def _handle_runner_notification(self, notification: RunnerNotification) -> None:
+        owner_key = self._owner_key_for_notification(notification)
+        if owner_key is not None and owner_key in self._active_live_renderers and "finished:" in notification.text:
+            await self._finalize_live_renderer(owner_key=owner_key, text=notification.text)
+            return
+        if owner_key is None:
+            await self.send_to_allowed_chat(notification.text)
+            return
+        renderer = self._active_live_renderers.get(owner_key)
+        if renderer is None:
+            await self.send_to_allowed_chat(notification.text)
+            return
+        await renderer.apply_event(ExecutionEvent(event_type="log", message=notification.text))
+
+    async def _start_live_renderer(
+        self,
+        *,
+        owner_key: str,
+        chat_id: int,
+        initial_text: str,
+    ) -> TelegramLiveRenderer:
+        renderer = TelegramLiveRenderer(chat_id=chat_id, sender=self._telegram_post)
+        await renderer.start(initial_text)
+        self._active_live_renderers[owner_key] = renderer
+        return renderer
+
+    async def _activate_job_live_renderer(self, *, owner_key: str, chat_id: int, title: str) -> None:
+        if owner_key in self._active_live_renderers:
+            return
+        await self._start_live_renderer(owner_key=owner_key, chat_id=chat_id, initial_text=title)
+
+    async def _finalize_live_renderer(self, *, owner_key: str, text: str) -> None:
+        renderer = self._active_live_renderers.pop(owner_key, None)
+        if renderer is None:
+            return
+        await renderer.finalize(text)
+
+    async def _run_live_typing_loop(
+        self,
+        *,
+        live_renderer: TelegramLiveRenderer,
+        stop_event: asyncio.Event,
+    ) -> None:
+        while not stop_event.is_set():
+            await live_renderer.send_typing_if_due()
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+
+    async def _run_chat_turn_with_live_renderer(
+        self,
+        *,
+        prompt: str,
+        thread_id: str | None,
+        live_renderer: TelegramLiveRenderer,
+        owner_key: str,
+    ) -> ChatTurnResult:
+        try:
+            return await self.runner.run_chat_turn(
+                prompt=prompt,
+                thread_id=thread_id,
+                event_callback=live_renderer.apply_event,
+                owner_key=owner_key,
+            )
+        except TypeError as exc:
+            message = str(exc)
+            if "owner_key" in message:
+                try:
+                    return await self.runner.run_chat_turn(
+                        prompt=prompt,
+                        thread_id=thread_id,
+                        event_callback=live_renderer.apply_event,
+                    )
+                except TypeError as nested_exc:
+                    if "event_callback" not in str(nested_exc):
+                        raise
+                    return await self.runner.run_chat_turn(prompt=prompt, thread_id=thread_id)
+            if "event_callback" in message:
+                try:
+                    return await self.runner.run_chat_turn(prompt=prompt, thread_id=thread_id, owner_key=owner_key)
+                except TypeError as nested_exc:
+                    if "owner_key" not in str(nested_exc):
+                        raise
+                    return await self.runner.run_chat_turn(prompt=prompt, thread_id=thread_id)
+            raise
+
+    async def _runner_start_run(self, prompt: str, *, owner_key: str):
+        try:
+            return await self.runner.start_run(prompt, owner_key=owner_key)
+        except TypeError as exc:
+            if "owner_key" not in str(exc):
+                raise
+            return await self.runner.start_run(prompt)
+
+    async def _runner_start_autopilot(self, task: str, *, owner_key: str):
+        try:
+            return await self.runner.start_autopilot(task, owner_key=owner_key)
+        except TypeError as exc:
+            if "owner_key" not in str(exc):
+                raise
+            return await self.runner.start_autopilot(task)
+
+    async def _runner_start_codex(self, raw_args: str, *, owner_key: str):
+        try:
+            return await self.runner.start_codex(raw_args, owner_key=owner_key)
+        except TypeError as exc:
+            if "owner_key" not in str(exc):
+                raise
+            return await self.runner.start_codex(raw_args)
+
+    async def _runner_cancel_active_job(self, *, owner_key: str) -> bool:
+        try:
+            return await self.runner.cancel_active_job(owner_key=owner_key)
+        except TypeError as exc:
+            if "owner_key" not in str(exc):
+                raise
+            return await self.runner.cancel_active_job()
+
+    def _owner_key_for_notification(self, notification: RunnerNotification) -> str | None:
+        if notification.job_id is None:
+            return None
+        job = self.store.get_job(notification.job_id)
+        if job is None:
+            return None
+        return job.owner_key
+
+    @staticmethod
+    def _owner_key(chat_id: int) -> str:
+        return f"chat:{chat_id}"
 
     async def send_message(self, chat_id: int, text: str) -> None:
         safe_text = redact_text(text)
@@ -1142,7 +1425,7 @@ class TelegramBotDaemon:
             self.settings.workspace_root / ".agents" / "skills",
             self.settings.workspace_root / ".codex" / "skills",
         )
-        names: set[str] = set()
+        names: set[str] = set(COMMAND_SKILL_ALIASES.keys())
         for root in roots:
             if not root.is_dir():
                 continue
@@ -1153,6 +1436,31 @@ class TelegramBotDaemon:
                     continue
                 names.add(child.name)
         return sorted(names, key=str.lower)
+
+    @staticmethod
+    def _compose_command_skill_text(*, skill_name: str, task: str) -> str | None:
+        alias = COMMAND_SKILL_ALIASES.get(skill_name)
+        if alias is None:
+            return None
+        command = alias.command
+        requires_task = alias.requires_task
+        clean_task = task.strip()
+        if requires_task and not clean_task:
+            return None
+        if clean_task:
+            return f"{command} {clean_task}"
+        return command
+
+    @staticmethod
+    def _format_skill_display_name(skill_name: str) -> str:
+        alias = COMMAND_SKILL_ALIASES.get(skill_name)
+        if alias is None:
+            return skill_name
+        task_hint = " <task>" if alias.requires_task else ""
+        return (
+            f"{skill_name} [{alias.category}] - {alias.description} "
+            f"(maps to {alias.command}{task_hint})"
+        )
 
     def _discover_prompt_names(self) -> list[str]:
         roots = (
@@ -1186,25 +1494,30 @@ class TelegramBotDaemon:
         capped = filtered[:MAX_DISCOVERED_ITEMS]
         extra_count = len(filtered) - len(capped)
         extra_text = f"\n...and {extra_count} more." if extra_count > 0 else ""
+        if label == "skills":
+            rendered_items = [self._format_skill_display_name(item) for item in capped]
+            items_block = "\n".join(f"- {item}" for item in rendered_items)
+        else:
+            items_block = ", ".join(capped)
         await self.send_message(
             chat_id,
             (
                 f"Available {label} ({len(filtered)}):\n"
-                + ", ".join(capped)
+                + items_block
                 + extra_text
                 + f"\n{usage}"
             ),
         )
 
     @staticmethod
-    def _parse_named_invocation(raw_arg: str) -> tuple[str, str] | None:
+    def _parse_named_invocation(raw_arg: str, *, require_task: bool = True) -> tuple[str, str] | None:
         arg = raw_arg.strip()
         if not arg:
             return None
         parts = arg.split(maxsplit=1)
         name = parts[0].strip()
         task = parts[1].strip() if len(parts) > 1 else ""
-        if not task:
+        if require_task and not task:
             return None
         if not INVOCATION_NAME_RE.match(name):
             return None
@@ -1218,7 +1531,12 @@ class TelegramBotDaemon:
         )
 
     @staticmethod
-    def _decode_named_invocation_payload(payload: str, *, expected_kind: str) -> tuple[str, str] | None:
+    def _decode_named_invocation_payload(
+        payload: str,
+        *,
+        expected_kind: str,
+        require_task: bool = True,
+    ) -> tuple[str, str] | None:
         try:
             data = json.loads(payload)
         except json.JSONDecodeError:
@@ -1231,9 +1549,12 @@ class TelegramBotDaemon:
         task = data.get("task")
         if not isinstance(name, str) or not INVOCATION_NAME_RE.match(name):
             return None
-        if not isinstance(task, str) or not task.strip():
+        if not isinstance(task, str):
             return None
-        return name, task.strip()
+        clean_task = task.strip()
+        if require_task and not clean_task:
+            return None
+        return name, clean_task
 
     @staticmethod
     def _encode_report_payload(*, topic: str, report_path: str) -> str:

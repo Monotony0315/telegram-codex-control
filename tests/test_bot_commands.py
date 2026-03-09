@@ -9,13 +9,21 @@ import pytest
 
 from telegram_codex_control.bot import TelegramBotDaemon
 from telegram_codex_control.config import Settings
-from telegram_codex_control.runner import ChatTurnResult
+from telegram_codex_control.runner import ChatTurnResult, RunnerNotification
 from telegram_codex_control.safety import SafetyManager
 from telegram_codex_control.store import ActiveJobExistsError, Store
 
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _sent_texts(client: "FakeTelegramClient") -> list[str]:
+    return [
+        payload["text"]
+        for url, payload in client.calls
+        if (url.endswith("/sendMessage") or url.endswith("/editMessageText")) and "text" in payload
+    ]
 
 
 class FakeResponse:
@@ -63,6 +71,10 @@ class FakeTelegramClient:
             return FakeResponse({"ok": True, "result": result})
         if url.endswith("/sendMessage"):
             return FakeResponse({"ok": True, "result": {"message_id": len(self.calls)}})
+        if url.endswith("/editMessageText"):
+            return FakeResponse({"ok": True, "result": {"message_id": payload.get("message_id", len(self.calls))}})
+        if url.endswith("/sendChatAction"):
+            return FakeResponse({"ok": True, "result": True})
         if url.endswith("/sendDocument"):
             return FakeResponse({"ok": True, "result": {"message_id": len(self.calls)}})
         return FakeResponse({"ok": True, "result": {}})
@@ -85,26 +97,42 @@ class DummyRunner:
         self.autopilot_calls: list[str] = []
         self.codex_calls: list[str] = []
         self.chat_calls: list[tuple[str, str | None]] = []
+        self.job_owner_keys: list[str] = []
+        self.chat_owner_keys: list[str] = []
         self.cancel_calls = 0
         self._notifier = None
 
     def set_notifier(self, notifier) -> None:
         self._notifier = notifier
 
-    async def start_run(self, prompt: str):
+    async def start_run(self, prompt: str, *, owner_key: str = "global"):
         self.run_calls.append(prompt)
+        self.job_owner_keys.append(owner_key)
         return type("Job", (), {"id": 101})()
 
-    async def start_autopilot(self, task: str):
+    async def start_autopilot(self, task: str, *, owner_key: str = "global"):
         self.autopilot_calls.append(task)
+        self.job_owner_keys.append(owner_key)
         return type("Job", (), {"id": 202})()
 
-    async def start_codex(self, raw_args: str):
+    async def start_codex(self, raw_args: str, *, owner_key: str = "global"):
         self.codex_calls.append(raw_args)
+        self.job_owner_keys.append(owner_key)
         return type("Job", (), {"id": 303})()
 
-    async def run_chat_turn(self, *, prompt: str, thread_id: str | None = None) -> ChatTurnResult:
+    async def run_chat_turn(
+        self,
+        *,
+        prompt: str,
+        thread_id: str | None = None,
+        event_callback=None,
+        owner_key: str = "global",
+    ) -> ChatTurnResult:
         self.chat_calls.append((prompt, thread_id))
+        self.chat_owner_keys.append(owner_key)
+        if event_callback is not None:
+            await event_callback(type("Evt", (), {"event_type": "status", "status": "running", "message": "Thinking"})())
+            await event_callback(type("Evt", (), {"event_type": "text_delta", "message": "chat-reply: "})())
         return ChatTurnResult(
             thread_id=thread_id or "thread-new",
             assistant_text=f"chat-reply: {prompt}",
@@ -260,6 +288,7 @@ def test_run_requires_confirm_then_runs(settings: Settings, store: Store) -> Non
     }
     _run(bot.handle_update(confirm))
     assert runner.run_calls == ["summarize this"]
+    assert runner.job_owner_keys[-1] == f"chat:{settings.allowed_chat_id}"
 
 
 def test_codex_requires_confirm_then_runs(settings: Settings, store: Store) -> None:
@@ -313,6 +342,65 @@ def test_help_lists_supported_commands(settings: Settings, store: Store) -> None
     assert "/codex" in sent_texts[-1]
     assert "/skill" in sent_texts[-1]
     assert "/prompt" in sent_texts[-1]
+
+
+def test_chat_uses_live_placeholder_and_message_edits(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/chat hello there",
+        )
+    )
+
+    methods = [url.rsplit("/", 1)[-1] for url, _payload in client.calls]
+    assert "sendMessage" in methods
+    assert "editMessageText" in methods
+
+
+def test_chat_passes_owner_key_for_current_chat(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/chat owner check",
+        )
+    )
+
+    assert runner.chat_owner_keys == [f"chat:{settings.allowed_chat_id}"]
+
+
+def test_runner_notifications_are_routed_to_matching_chat_renderer(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    job_one = store.create_job(command="run", prompt="one", status="RUNNING", owner_key="chat:2222")
+    job_two = store.create_job(command="run", prompt="two", status="RUNNING", owner_key="chat:3333")
+
+    async def scenario() -> None:
+        await bot._start_live_renderer(owner_key="chat:2222", chat_id=2222, initial_text="job one")
+        await bot._start_live_renderer(owner_key="chat:3333", chat_id=3333, initial_text="job two")
+        bot._active_live_renderers["chat:2222"].edit_interval_seconds = 0.0
+        bot._active_live_renderers["chat:3333"].edit_interval_seconds = 0.0
+        await bot._handle_runner_notification(RunnerNotification(text="job1 log", job_id=job_one.id))
+        await bot._handle_runner_notification(RunnerNotification(text="job2 log", job_id=job_two.id))
+
+    _run(scenario())
+
+    edits = [payload for url, payload in client.calls if url.endswith("/editMessageText")]
+    assert edits == [
+        {"chat_id": 2222, "message_id": 1, "text": "job1 log"},
+        {"chat_id": 3333, "message_id": 2, "text": "job2 log"},
+    ]
 
 
 def test_files_lists_workspace_entries(settings: Settings, store: Store, workspace_root) -> None:
@@ -584,6 +672,66 @@ def test_skill_requires_confirm_then_runs(settings: Settings, store: Store) -> N
     assert runner.run_calls == ["$analyze investigate race condition"]
 
 
+def test_skill_command_alias_without_task_dispatches_to_command(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    request = {
+        "update_id": 901,
+        "message": {
+            "chat": {"id": settings.allowed_chat_id},
+            "from": {"id": settings.allowed_user_id},
+            "text": "/skill cmd-status",
+        },
+    }
+    _run(bot.handle_update(request))
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    match = re.search(r"/confirm ([a-f0-9]+)", sent_texts[-1])
+    assert match is not None
+    nonce = match.group(1)
+
+    confirm = {
+        "update_id": 902,
+        "message": {
+            "chat": {"id": settings.allowed_chat_id},
+            "from": {"id": settings.allowed_user_id},
+            "text": f"/confirm {nonce}",
+        },
+    }
+    _run(bot.handle_update(confirm))
+
+    assert runner.run_calls == []
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert any("health: ok" in text for text in sent_texts)
+    assert any("uptime_seconds: 12" in text for text in sent_texts)
+
+
+def test_skill_command_alias_requires_task_for_cmd_run(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 903,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "/skill cmd-run",
+                },
+            }
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    assert sent_texts[-1] == "Usage: /skill cmd-run <task>"
+
+
 def test_prompt_requires_confirm_then_runs(settings: Settings, store: Store) -> None:
     client = FakeTelegramClient()
     runner = DummyRunner()
@@ -646,6 +794,41 @@ def test_skills_and_prompts_list_discovered_items(settings: Settings, store: Sto
     assert any("Use: /prompt <name> <task>" in text for text in sent_texts)
 
 
+def test_discover_skill_names_includes_command_aliases(settings: Settings, store: Store) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    names = bot._discover_skill_names()
+    assert "cmd-status" in names
+    assert "cmd-run" in names
+
+
+def test_skills_cmd_filter_shows_command_skill_details(settings: Settings, store: Store, monkeypatch) -> None:
+    client = FakeTelegramClient()
+    runner = DummyRunner()
+    bot = _make_bot(settings, store, runner, client)
+    monkeypatch.setattr(bot, "_discover_skill_names", lambda: ["cmd-status", "cmd-run", "analyze"])
+
+    _run(
+        bot.handle_command(
+            chat_id=settings.allowed_chat_id,
+            user_id=settings.allowed_user_id,
+            text="/skills cmd-",
+        )
+    )
+
+    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    assert sent_texts
+    text = sent_texts[-1]
+    assert "Available skills (2):" in text
+    assert "cmd-status [Monitoring]" in text
+    assert "maps to /status" in text
+    assert "cmd-run [Execution]" in text
+    assert "maps to /run <task>" in text
+    assert "Use: /skill <name> <task>" in text
+
+
 def test_plain_text_routes_to_chat_turn(settings: Settings, store: Store) -> None:
     client = FakeTelegramClient()
     runner = DummyRunner()
@@ -666,7 +849,7 @@ def test_plain_text_routes_to_chat_turn(settings: Settings, store: Store) -> Non
 
     assert runner.chat_calls == [("hello from telegram", None)]
     assert store.get_chat_session_thread(user_id=settings.allowed_user_id, chat_id=settings.allowed_chat_id) == "thread-new"
-    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    sent_texts = _sent_texts(client)
     assert sent_texts[-1] == "chat-reply: hello from telegram"
     rows = store.list_events(limit=20)
     chat_events = [row for row in rows if row["event_type"] == "chat_turn"]
@@ -702,7 +885,7 @@ def test_plain_text_chat_reports_session_persistence_failure(
         )
     )
 
-    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    sent_texts = _sent_texts(client)
     assert sent_texts
     assert sent_texts[-1] == "Chat turn failed: db write failed"
     assert not any("Internal error while handling command." in text for text in sent_texts)
@@ -750,7 +933,7 @@ def test_chat_reset_clears_saved_thread(settings: Settings, store: Store) -> Non
     )
 
     assert store.get_chat_session_thread(user_id=settings.allowed_user_id, chat_id=settings.allowed_chat_id) is None
-    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    sent_texts = _sent_texts(client)
     assert sent_texts[-1] == "Chat session reset."
 
 
@@ -774,7 +957,7 @@ def test_plain_text_chat_guides_when_interactive_mode_disabled(settings: Setting
     )
 
     assert runner.chat_calls == []
-    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    sent_texts = _sent_texts(client)
     assert sent_texts
     assert sent_texts[-1] == "Interactive chat is disabled. Use slash commands or set TELEGRAM_INTERACTIVE_MODE=true."
 
@@ -802,9 +985,72 @@ def test_plain_text_chat_reports_runner_failure(settings: Settings, store: Store
         )
     )
 
-    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    sent_texts = _sent_texts(client)
     assert sent_texts
     assert sent_texts[-1] == "Chat turn failed: network down"
+
+
+def test_plain_text_chat_reports_dns_restriction_guidance(settings: Settings, store: Store) -> None:
+    class _FailingRunner(DummyRunner):
+        async def run_chat_turn(self, *, prompt: str, thread_id: str | None = None) -> ChatTurnResult:
+            del prompt, thread_id
+            raise RuntimeError("Could not resolve host: api.notion.com")
+
+    client = FakeTelegramClient()
+    runner = _FailingRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 145,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "plain text command",
+                },
+            }
+        )
+    )
+
+    sent_texts = _sent_texts(client)
+    assert sent_texts
+    assert sent_texts[-1].startswith("External network appears restricted in this session")
+    assert "api.notion.com" in sent_texts[-1]
+
+
+def test_plain_text_chat_timeout_sends_actionable_guidance(settings: Settings, store: Store) -> None:
+    class _TimeoutRunner(DummyRunner):
+        async def run_chat_turn(self, *, prompt: str, thread_id: str | None = None) -> ChatTurnResult:
+            del prompt, thread_id
+            raise RuntimeError("Chat turn timed out")
+
+    client = FakeTelegramClient()
+    runner = _TimeoutRunner()
+    bot = _make_bot(settings, store, runner, client)
+
+    _run(
+        bot.handle_update(
+            {
+                "update_id": 47,
+                "message": {
+                    "chat": {"id": settings.allowed_chat_id},
+                    "from": {"id": settings.allowed_user_id},
+                    "text": "plain text command",
+                },
+            }
+        )
+    )
+
+    sent_texts = _sent_texts(client)
+    assert sent_texts
+    assert sent_texts[-1].startswith("Chat response timed out, but the run may still be active.")
+    assert "retry to resume" in sent_texts[-1]
+    assert "CHAT_TURN_PROGRESS_TIMEOUT_SECONDS" in sent_texts[-1]
+    assert "Chat turn failed: Chat turn timed out" not in sent_texts[-1]
+    rows = [row for row in store.list_events(limit=20) if row["event_type"] == "chat_turn_timeout"]
+    assert rows
+    assert "progress_timeout=" in rows[-1]["message"]
 
 
 def test_plain_text_chat_empty_response_sends_actionable_message(settings: Settings, store: Store) -> None:
@@ -830,7 +1076,7 @@ def test_plain_text_chat_empty_response_sends_actionable_message(settings: Setti
         )
     )
 
-    sent_texts = [payload["text"] for url, payload in client.calls if url.endswith("/sendMessage")]
+    sent_texts = _sent_texts(client)
     assert sent_texts
     assert sent_texts[-1] == "No response from Codex. Please retry, or run /chat reset."
     rows = store.list_events(limit=20)

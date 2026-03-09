@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+## 0.3.7 - 2026-03-10
+- Added live execution primitives for Telegram interactions:
+  - normalized `ExecutionEvent` parsing from Codex JSONL output
+  - live Telegram message renderer with `editMessageText` updates and `typing` heartbeats
+  - `/chat` now starts with an immediate placeholder and updates in place while the turn is running
+  - job notifications can attach to the same live renderer path instead of only sending one-off messages
+- Added owner-scoped live renderer routing so concurrent chats do not overwrite each other's progress cards.
+- Added optional Rust live-core helper support via `CODEX_LIVE_CORE_COMMAND` for normalized `/chat` event streaming.
+- Added `scripts/build-live-core.sh`, bootstrap auto-build, and service install refresh for the Rust helper deployment path.
+- Added tests covering live event parsing, live renderer behavior, runner event callbacks, and bot live-chat flow.
+
 ## 0.3.6 - 2026-02-20
 - Improved macOS launch-agent install resiliency by falling back to `launchctl load -w` when `bootstrap` intermittently fails.
 

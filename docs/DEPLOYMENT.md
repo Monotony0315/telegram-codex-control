@@ -16,6 +16,7 @@ Edit `.env` with at least:
 - `ALLOWED_CHAT_ID`
 - `WORKSPACE_ROOT`
 - `CODEX_COMMAND`
+- `CODEX_LIVE_CORE_COMMAND` (optional, recommended if you built the Rust helper)
 
 Optional:
 - `COMMAND_POLICY_PATH`
@@ -26,6 +27,16 @@ Optional:
 set -a; source .env; set +a
 PYTHONPATH=src .venv/bin/python -m telegram_codex_control.main
 ```
+
+Optional helper build:
+```bash
+./scripts/build-live-core.sh
+```
+
+Notes:
+- `bootstrap.sh` builds the helper automatically when `cargo` is available.
+- `install-service.sh` refreshes the helper before installing the service when `cargo` is available.
+- `run-daemon.sh` auto-uses `./.data/bin/tgcc-live-core` when present, even if `.env` leaves `CODEX_LIVE_CORE_COMMAND` empty.
 
 In Telegram:
 1. `/status`
@@ -72,6 +83,46 @@ Uninstall:
 Platform notes:
 - macOS: LaunchAgent under `~/Library/LaunchAgents`
 - Linux: systemd user unit under `~/.config/systemd/user`
+
+## 5b) Offsite Operation (No launchctl/systemd/ps)
+Note:
+- Run either background service mode (`install-service`) or offsite mode, not both at once.
+
+Start workspace-local supervisor:
+```bash
+./scripts/offsite-start.sh
+```
+
+Check health and recent audit events:
+```bash
+./scripts/offsite-status.sh
+```
+
+Stop supervisor:
+```bash
+./scripts/offsite-stop.sh
+```
+
+Enable login-shell autostart (default profile: `~/.zprofile`):
+```bash
+./scripts/install-offsite-login-autostart.sh
+```
+
+Disable login-shell autostart:
+```bash
+./scripts/uninstall-offsite-login-autostart.sh
+```
+
+Optional profile override for testing/special cases:
+```bash
+OFFSITE_LOGIN_PROFILE_PATH=~/.zshrc ./scripts/install-offsite-login-autostart.sh
+```
+
+Offsite stale timeout examples (`.env`):
+```env
+OFFSITE_STALE_TIMEOUT_SECONDS=600
+OFFSITE_CHECK_INTERVAL_SECONDS=10
+```
 
 ## 6) Command Policy
 Template:

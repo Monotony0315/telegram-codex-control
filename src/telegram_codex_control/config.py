@@ -123,6 +123,8 @@ class Settings:
     poll_retry_max_seconds: float
     job_timeout_seconds: int
     chat_turn_timeout_seconds: int
+    chat_turn_retry_count: int
+    chat_turn_reset_session_on_timeout: bool
     confirmation_ttl_seconds: int
     message_chunk_size: int
     telegram_api_base: str
@@ -137,6 +139,9 @@ class Settings:
     max_download_file_size_bytes: int
     max_upload_file_size_bytes: int
     command_policy_path: Path | None
+    chat_turn_progress_timeout_seconds: int = 300
+    codex_command_fallback: str | None = None
+    codex_live_core_command: str | None = None
 
     @property
     def telegram_base_url(self) -> str:
@@ -253,12 +258,21 @@ class Settings:
             db_path=db_path,
             audit_log_path=audit_log_path,
             codex_command=raw_env.get("CODEX_COMMAND", "codex"),
+            codex_command_fallback=(raw_env.get("CODEX_COMMAND_FALLBACK", "").strip() or None),
+            codex_live_core_command=(raw_env.get("CODEX_LIVE_CORE_COMMAND", "").strip() or None),
             telegram_interactive_mode=_parse_bool(raw_env, "TELEGRAM_INTERACTIVE_MODE", True),
             poll_timeout_seconds=_parse_int(raw_env, "POLL_TIMEOUT_SECONDS", 30),
             poll_retry_base_seconds=_parse_float(raw_env, "POLL_RETRY_BASE_SECONDS", 1.0),
             poll_retry_max_seconds=_parse_float(raw_env, "POLL_RETRY_MAX_SECONDS", 30.0),
             job_timeout_seconds=_parse_int(raw_env, "JOB_TIMEOUT_SECONDS", 7200),
-            chat_turn_timeout_seconds=_parse_int(raw_env, "CHAT_TURN_TIMEOUT_SECONDS", 180),
+            chat_turn_timeout_seconds=_parse_int(raw_env, "CHAT_TURN_TIMEOUT_SECONDS", 1800),
+            chat_turn_progress_timeout_seconds=_parse_int(
+                raw_env,
+                "CHAT_TURN_PROGRESS_TIMEOUT_SECONDS",
+                300,
+            ),
+            chat_turn_retry_count=_parse_int(raw_env, "CHAT_TURN_RETRY_COUNT", 1),
+            chat_turn_reset_session_on_timeout=_parse_bool(raw_env, "CHAT_TURN_RESET_SESSION_ON_TIMEOUT", True),
             confirmation_ttl_seconds=_parse_int(raw_env, "CONFIRMATION_TTL_SECONDS", 300),
             message_chunk_size=chunk_size,
             telegram_api_base=raw_env.get("TELEGRAM_API_BASE", "https://api.telegram.org").rstrip("/"),
@@ -296,6 +310,10 @@ class Settings:
             raise ConfigError("JOB_TIMEOUT_SECONDS must be greater than 0")
         if settings.chat_turn_timeout_seconds <= 0:
             raise ConfigError("CHAT_TURN_TIMEOUT_SECONDS must be greater than 0")
+        if settings.chat_turn_progress_timeout_seconds <= 0:
+            raise ConfigError("CHAT_TURN_PROGRESS_TIMEOUT_SECONDS must be greater than 0")
+        if settings.chat_turn_retry_count < 0:
+            raise ConfigError("CHAT_TURN_RETRY_COUNT must be >= 0")
         if settings.confirmation_ttl_seconds <= 0:
             raise ConfigError("CONFIRMATION_TTL_SECONDS must be greater than 0")
         if settings.max_download_file_size_bytes <= 0:
@@ -304,6 +322,10 @@ class Settings:
             raise ConfigError("MAX_UPLOAD_FILE_SIZE_BYTES must be greater than 0")
         if not settings.codex_command.strip():
             raise ConfigError("CODEX_COMMAND must not be empty")
+        if settings.codex_command_fallback is not None and not settings.codex_command_fallback.strip():
+            raise ConfigError("CODEX_COMMAND_FALLBACK must not be empty when set")
+        if settings.codex_live_core_command is not None and not settings.codex_live_core_command.strip():
+            raise ConfigError("CODEX_LIVE_CORE_COMMAND must not be empty when set")
         if settings.telegram_transport not in {"polling", "webhook"}:
             raise ConfigError("TELEGRAM_TRANSPORT must be either 'polling' or 'webhook'")
         if not settings.telegram_webhook_listen_host:

@@ -11,3 +11,6 @@ build/
 *.egg-info/
 .release/
 .codex/
+.omx/
+docs/plans/
+rust/live-core/target/

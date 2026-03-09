@@ -35,6 +35,8 @@ Keywords: `telegram bot`, `codex cli`, `remote development`, `developer automati
   - token/secret redaction in logs and outbound messages
 - Operations:
   - SQLite state + JSONL audit
+  - optional automatic fallback to `CODEX_COMMAND_FALLBACK` when the primary Codex command fails on DNS/network restrictions
+  - optional Rust `CODEX_LIVE_CORE_COMMAND` helper for normalized `/chat` event streaming
   - macOS `launchd` and Linux `systemd --user` service scripts
   - release pipeline with SBOM + artifact signing/checksums
 
@@ -52,6 +54,7 @@ ALLOWED_CHAT_ID=123456789
 WORKSPACE_ROOT=$HOME/Projects
 UPLOAD_DIR=.data/uploads
 CODEX_COMMAND=/absolute/path/to/codex
+# Optional: CODEX_LIVE_CORE_COMMAND=/absolute/path/to/tgcc-live-core
 TELEGRAM_INTERACTIVE_MODE=true
 TELEGRAM_TRANSPORT=polling
 # COMMAND_POLICY_PATH=./command-policy.example.json
@@ -61,6 +64,11 @@ Run locally:
 ```bash
 set -a; source .env; set +a
 PYTHONPATH=src .venv/bin/python -m telegram_codex_control.main
+```
+
+Build or refresh the optional Rust live-core helper manually:
+```bash
+./scripts/build-live-core.sh
 ```
 
 ## Webhook Mode
@@ -116,6 +124,46 @@ Uninstall:
 ./scripts/uninstall-service.sh
 ```
 
+## Offsite Mode (No launchctl/ps required)
+Note:
+- Run either `install-service` mode or offsite mode, not both at the same time.
+
+Start:
+```bash
+./scripts/offsite-start.sh
+```
+
+Status:
+```bash
+./scripts/offsite-status.sh
+```
+
+Stop:
+```bash
+./scripts/offsite-stop.sh
+```
+
+Enable login-shell autostart (default profile: `~/.zprofile`):
+```bash
+./scripts/install-offsite-login-autostart.sh
+```
+
+Disable login-shell autostart:
+```bash
+./scripts/uninstall-offsite-login-autostart.sh
+```
+
+Optional profile override for testing/special cases:
+```bash
+OFFSITE_LOGIN_PROFILE_PATH=~/.zshrc ./scripts/install-offsite-login-autostart.sh
+```
+
+Optional `.env` tuning:
+```env
+OFFSITE_STALE_TIMEOUT_SECONDS=900
+OFFSITE_CHECK_INTERVAL_SECONDS=15
+```
+
 ## Secure Release
 Build + SBOM + signatures/checksums:
 ```bash
@@ -141,6 +189,8 @@ For GitHub tag releases, workflow requires `RELEASE_PRIVATE_KEY_PEM` secret and 
 - `DB_PATH` (default: `.data/state.db`)
 - `AUDIT_LOG_PATH` (default: `.data/audit.jsonl`)
 - `CODEX_COMMAND` (default: `codex`)
+- `CODEX_COMMAND_FALLBACK` (optional; if set, the daemon retries failed DNS-restricted jobs/chat turns with this command)
+- `CODEX_LIVE_CORE_COMMAND` (optional; if set, `/chat` uses the Rust helper for normalized live events before falling back to the direct Python subprocess path)
 - `TELEGRAM_INTERACTIVE_MODE` (default: `true`; when enabled, plain text is handled as `/chat <message>`)
 - `COMMAND_POLICY_PATH` (optional)
 - `TELEGRAM_TRANSPORT` (`polling` or `webhook`, default `polling`)
@@ -153,7 +203,10 @@ For GitHub tag releases, workflow requires `RELEASE_PRIVATE_KEY_PEM` secret and 
 - `POLL_RETRY_BASE_SECONDS` (default `1.0`)
 - `POLL_RETRY_MAX_SECONDS` (default `30.0`)
 - `JOB_TIMEOUT_SECONDS` (default `7200`)
-- `CHAT_TURN_TIMEOUT_SECONDS` (default `180`, timeout for interactive `/chat` turns)
+- `CHAT_TURN_TIMEOUT_SECONDS` (default `1800`, absolute timeout cap for interactive `/chat` turns)
+- `CHAT_TURN_PROGRESS_TIMEOUT_SECONDS` (default `300`, silent-period threshold for `/chat` status checks; each check extends the continuation window up to the absolute timeout cap)
+- `CHAT_TURN_RETRY_COUNT` (default `1`, retry count for interactive `/chat` timeouts)
+- `CHAT_TURN_RESET_SESSION_ON_TIMEOUT` (default `true`, retry timed-out `/chat` using a fresh session)
 - `SUBPROCESS_ENV_ALLOWLIST` (optional CSV env names to pass into Codex subprocess)
 - `SUBPROCESS_ENV_PREFIX_ALLOWLIST` (optional CSV env name prefixes to pass into Codex subprocess)
 - `SUBPROCESS_HOME` (optional absolute/relative path override for subprocess `HOME`; default inherits launcher `HOME`)
@@ -162,6 +215,19 @@ For GitHub tag releases, workflow requires `RELEASE_PRIVATE_KEY_PEM` secret and 
 - `MAX_DOWNLOAD_FILE_SIZE_BYTES` (default `5242880`)
 - `MAX_UPLOAD_FILE_SIZE_BYTES` (default `5242880`)
 - `TELEGRAM_API_BASE` (default `https://api.telegram.org`)
+
+## Restricted Network Environments
+When the primary Codex process fails with DNS-style errors (for example `Could not resolve host`, `Errno 8`), you can keep Telegram execution working by setting:
+
+```env
+CODEX_COMMAND_FALLBACK=/absolute/path/to/network-enabled-codex-wrapper
+```
+
+Behavior:
+- `/run`, `/autopilot`, `/codex`: automatically retried once with `CODEX_COMMAND_FALLBACK`
+- `/chat`: automatically retried with the fallback command
+- if `CODEX_LIVE_CORE_COMMAND` points at a built helper, `/chat` streams normalized events through that helper first
+- If both primary and fallback fail, the bot reports the failure and keeps local workspace commands available (`/files`, `/search`, `/read`, `/download`)
 
 ## Testing
 ```bash

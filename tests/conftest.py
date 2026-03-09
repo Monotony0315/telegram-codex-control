@@ -32,6 +32,8 @@ def settings(tmp_path: Path, workspace_root: Path) -> Settings:
         poll_retry_max_seconds=0.1,
         job_timeout_seconds=30,
         chat_turn_timeout_seconds=30,
+        chat_turn_retry_count=1,
+        chat_turn_reset_session_on_timeout=True,
         confirmation_ttl_seconds=120,
         message_chunk_size=3500,
         telegram_api_base="https://api.telegram.org",
@@ -46,6 +48,7 @@ def settings(tmp_path: Path, workspace_root: Path) -> Settings:
         max_download_file_size_bytes=5 * 1024 * 1024,
         max_upload_file_size_bytes=5 * 1024 * 1024,
         command_policy_path=None,
+        codex_live_core_command=None,
     )
 
 

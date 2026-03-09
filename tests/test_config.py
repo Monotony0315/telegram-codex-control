@@ -202,6 +202,68 @@ def test_from_env_parses_chat_turn_timeout(workspace_root: Path) -> None:
     assert settings.chat_turn_timeout_seconds == 45
 
 
+def test_from_env_parses_chat_turn_progress_timeout(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "CHAT_TURN_PROGRESS_TIMEOUT_SECONDS": "30",
+    }
+    settings = Settings.from_env(env=env, base_dir=workspace_root)
+    assert settings.chat_turn_progress_timeout_seconds == 30
+
+
+def test_from_env_uses_generous_chat_turn_timeout_defaults(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+    }
+    settings = Settings.from_env(env=env, base_dir=workspace_root)
+    assert settings.chat_turn_timeout_seconds == 1800
+    assert settings.chat_turn_progress_timeout_seconds == 300
+
+
+def test_from_env_parses_chat_turn_retry_controls(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "CHAT_TURN_RETRY_COUNT": "2",
+        "CHAT_TURN_RESET_SESSION_ON_TIMEOUT": "false",
+    }
+    settings = Settings.from_env(env=env, base_dir=workspace_root)
+    assert settings.chat_turn_retry_count == 2
+    assert settings.chat_turn_reset_session_on_timeout is False
+
+
+def test_from_env_parses_codex_fallback_command(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "CODEX_COMMAND_FALLBACK": "/usr/local/bin/codex-fallback",
+    }
+    settings = Settings.from_env(env=env, base_dir=workspace_root)
+    assert settings.codex_command_fallback == "/usr/local/bin/codex-fallback"
+
+
+def test_from_env_parses_codex_live_core_command(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "CODEX_LIVE_CORE_COMMAND": "/usr/local/bin/tgcc-live-core --fast",
+    }
+    settings = Settings.from_env(env=env, base_dir=workspace_root)
+    assert settings.codex_live_core_command == "/usr/local/bin/tgcc-live-core --fast"
+
+
 def test_from_env_rejects_invalid_chat_turn_timeout(workspace_root: Path) -> None:
     env = {
         "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
@@ -209,6 +271,30 @@ def test_from_env_rejects_invalid_chat_turn_timeout(workspace_root: Path) -> Non
         "ALLOWED_CHAT_ID": "2",
         "WORKSPACE_ROOT": str(workspace_root),
         "CHAT_TURN_TIMEOUT_SECONDS": "0",
+    }
+    with pytest.raises(ConfigError):
+        Settings.from_env(env=env, base_dir=workspace_root)
+
+
+def test_from_env_rejects_invalid_chat_turn_progress_timeout(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "CHAT_TURN_PROGRESS_TIMEOUT_SECONDS": "0",
+    }
+    with pytest.raises(ConfigError):
+        Settings.from_env(env=env, base_dir=workspace_root)
+
+
+def test_from_env_rejects_invalid_chat_turn_retry_count(workspace_root: Path) -> None:
+    env = {
+        "TELEGRAM_BOT_TOKEN": "123456:TEST_TOKEN_VALUE_xxxxxxxxxxxxxxxxx",
+        "ALLOWED_USER_ID": "1",
+        "ALLOWED_CHAT_ID": "2",
+        "WORKSPACE_ROOT": str(workspace_root),
+        "CHAT_TURN_RETRY_COUNT": "-1",
     }
     with pytest.raises(ConfigError):
         Settings.from_env(env=env, base_dir=workspace_root)

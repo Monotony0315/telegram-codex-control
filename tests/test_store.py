@@ -8,15 +8,18 @@ import pytest
 from telegram_codex_control.store import ActiveJobExistsError, MAX_EVENT_ROWS, Store
 
 
-def test_store_enforces_one_active_job(store: Store) -> None:
-    first = store.create_job(command="run", prompt="one", status="RUNNING")
+def test_store_enforces_one_active_job_per_owner(store: Store) -> None:
+    first = store.create_job(command="run", prompt="one", status="RUNNING", owner_key="chat:1")
     assert first.status == "RUNNING"
 
     with pytest.raises(ActiveJobExistsError):
-        store.create_job(command="run", prompt="two", status="RUNNING")
+        store.create_job(command="run", prompt="two", status="RUNNING", owner_key="chat:1")
+
+    parallel = store.create_job(command="run", prompt="parallel", status="RUNNING", owner_key="chat:2")
+    assert parallel.status == "RUNNING"
 
     store.set_job_status(first.id, "SUCCEEDED", exit_code=0)
-    second = store.create_job(command="run", prompt="three", status="RUNNING")
+    second = store.create_job(command="run", prompt="three", status="RUNNING", owner_key="chat:1")
     assert second.id > first.id
 
 

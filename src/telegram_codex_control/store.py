@@ -31,6 +31,7 @@ class ActiveJobExistsError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class Job:
     id: int
+    owner_key: str
     command: str
     prompt: str
     status: str
@@ -88,6 +89,7 @@ class Store:
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_key TEXT NOT NULL DEFAULT 'global',
                     command TEXT NOT NULL,
                     prompt TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -133,16 +135,23 @@ class Store:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (user_id, chat_id)
                 );
-
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_single_active
-                ON jobs((1))
-                WHERE status IN ('PENDING', 'CONFIRMING', 'RUNNING');
                 """
             )
             self._conn.execute(
                 "INSERT OR IGNORE INTO offsets (id, last_update_id) VALUES (1, -1);"
             )
             self._ensure_column_exists("jobs", "pid_start_token", "TEXT")
+            self._ensure_column_exists("jobs", "owner_key", "TEXT NOT NULL DEFAULT 'global'")
+            self._conn.execute("UPDATE jobs SET owner_key = 'global' WHERE owner_key IS NULL OR owner_key = ''")
+            self._conn.execute("DROP INDEX IF EXISTS idx_jobs_single_active")
+            self._conn.execute("DROP INDEX IF EXISTS idx_jobs_active_owner")
+            self._conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_owner
+                ON jobs(owner_key)
+                WHERE status IN ('PENDING', 'CONFIRMING', 'RUNNING');
+                """
+            )
             self._conn.commit()
 
     def claim_update(self, update_id: int) -> bool:
@@ -220,23 +229,31 @@ class Store:
             ).fetchone()
             return int(row["last_update_id"]) if row else -1
 
-    def create_job(self, command: str, prompt: str, status: str = "RUNNING") -> Job:
+    def create_job(
+        self,
+        command: str,
+        prompt: str,
+        status: str = "RUNNING",
+        *,
+        owner_key: str = "global",
+    ) -> Job:
         now = utc_now_iso()
         started_at = now if status == "RUNNING" else None
         stored_prompt = redact_text(prompt)
+        normalized_owner_key = owner_key.strip() or "global"
         with self._lock:
             try:
                 cursor = self._conn.execute(
                     """
-                    INSERT INTO jobs (command, prompt, status, created_at, updated_at, started_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO jobs (owner_key, command, prompt, status, created_at, updated_at, started_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (command, stored_prompt, status, now, now, started_at),
+                    (normalized_owner_key, command, stored_prompt, status, now, now, started_at),
                 )
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:
                 self._conn.rollback()
-                raise ActiveJobExistsError("An active job already exists") from exc
+                raise ActiveJobExistsError(f"An active job already exists for owner={normalized_owner_key}") from exc
             row = self._conn.execute("SELECT * FROM jobs WHERE id = ?", (cursor.lastrowid,)).fetchone()
             assert row is not None
             return self._row_to_job(row)
@@ -279,16 +296,28 @@ class Store:
             row = self._conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             return self._row_to_job(row) if row else None
 
-    def get_active_job(self) -> Job | None:
+    def get_active_job(self, *, owner_key: str | None = None) -> Job | None:
         with self._lock:
-            row = self._conn.execute(
-                """
-                SELECT * FROM jobs
-                WHERE status IN ('PENDING', 'CONFIRMING', 'RUNNING')
-                ORDER BY id DESC
-                LIMIT 1
-                """
-            ).fetchone()
+            if owner_key is None:
+                row = self._conn.execute(
+                    """
+                    SELECT * FROM jobs
+                    WHERE status IN ('PENDING', 'CONFIRMING', 'RUNNING')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """
+                    SELECT * FROM jobs
+                    WHERE owner_key = ?
+                      AND status IN ('PENDING', 'CONFIRMING', 'RUNNING')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (owner_key,),
+                ).fetchone()
             return self._row_to_job(row) if row else None
 
     def recover_interrupted_jobs(self) -> int:
@@ -598,6 +627,7 @@ class Store:
     def _row_to_job(row: sqlite3.Row) -> Job:
         return Job(
             id=row["id"],
+            owner_key=row["owner_key"] or "global",
             command=row["command"],
             prompt=row["prompt"],
             status=row["status"],

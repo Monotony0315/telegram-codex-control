@@ -34,6 +34,12 @@ if [[ -d "${HOME}/.nvm/versions/node" ]]; then
   fi
 fi
 
+DEFAULT_LIVE_CORE_COMMAND="${PROJECT_DIR}/.data/bin/tgcc-live-core"
+if [[ -z "${CODEX_LIVE_CORE_COMMAND:-}" && -x "${DEFAULT_LIVE_CORE_COMMAND}" ]]; then
+  CODEX_LIVE_CORE_COMMAND="${DEFAULT_LIVE_CORE_COMMAND}"
+  export CODEX_LIVE_CORE_COMMAND
+fi
+
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${PROJECT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
